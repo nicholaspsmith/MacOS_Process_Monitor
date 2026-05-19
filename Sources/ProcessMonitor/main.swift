@@ -317,24 +317,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // reserves columns for checkmark + shortcut indicator alignment).
     // Uses explicit frames rather than constraints — NSMenu reads the view's
     // frame at insertion time, before any auto-layout pass would have run, so
-    // a constraint-only view ends up zero-sized and invisible.
+    // a constraint-only view ends up zero-sized and invisible. Measures text
+    // directly via NSString.size(withAttributes:) since NSTextField's
+    // intrinsicContentSize rounds down to sub-pixel values and clips the
+    // trailing glyph.
     private func makeSparklineView(text: String, font: NSFont) -> NSView {
-        // Left indent mirrors NSMenu's standard title position; right padding
-        // is kept tight so the menu width tracks the bars themselves.
         let leftPad: CGFloat = 20
-        let rightPad: CGFloat = 16
+        let rightPad: CGFloat = 6
         let vPad: CGFloat = 3
+        // Safety buffer: covers sub-pixel font metrics so the last glyph
+        // never clips, regardless of which characters end up in the text.
+        let textBuffer: CGFloat = 4
+
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        let measured = (text as NSString).size(withAttributes: attrs)
+        let labelWidth = ceil(measured.width) + textBuffer
+        let labelHeight = ceil(measured.height)
 
         let label = NSTextField(labelWithString: text)
         label.font = font
         label.textColor = .secondaryLabelColor
-        let labelSize = label.intrinsicContentSize
-        label.frame = NSRect(x: leftPad, y: vPad, width: labelSize.width, height: labelSize.height)
+        label.frame = NSRect(x: leftPad, y: vPad, width: labelWidth, height: labelHeight)
 
         let container = NSView(frame: NSRect(
             x: 0, y: 0,
-            width: labelSize.width + leftPad + rightPad,
-            height: labelSize.height + vPad * 2
+            width: labelWidth + leftPad + rightPad,
+            height: labelHeight + vPad * 2
         ))
         container.addSubview(label)
         return container
