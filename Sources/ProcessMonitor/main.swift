@@ -249,20 +249,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        // Sparkline (informational)
+        // Sparkline — view-based so it doesn't reserve trailing space for the
+        // keyboard-shortcut column that macOS menus apply to standard items.
         let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let spark = history.sparkline()
         let sparkText: String = {
             if let r = history.range, r.max > r.min {
-                return "History  \(spark)   \(r.min)→\(r.max)"
+                return "\(spark)   \(r.min)→\(r.max)"
             }
-            return "History  \(spark)"
+            return spark
         }()
-        let sparkItem = NSMenuItem(title: sparkText, action: nil, keyEquivalent: "")
-        sparkItem.attributedTitle = NSAttributedString(
-            string: sparkText,
-            attributes: [.font: mono, .foregroundColor: NSColor.secondaryLabelColor]
-        )
+        let sparkItem = NSMenuItem()
+        sparkItem.view = makeSparklineView(text: sparkText, font: mono)
         menu.addItem(sparkItem)
 
         // Crash-loop section (only when present)
@@ -312,6 +310,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    // Wraps a label in an NSView sized to its intrinsic content. Used so the
+    // sparkline item escapes NSMenu's standard layout (where every row
+    // reserves columns for checkmark + shortcut indicator alignment).
+    private func makeSparklineView(text: String, font: NSFont) -> NSView {
+        let label = NSTextField(labelWithString: text)
+        label.font = font
+        label.textColor = .secondaryLabelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSView()
+        container.addSubview(label)
+        // Left padding mirrors NSMenu's standard title indent so the sparkline
+        // visually aligns with the text in adjacent items. Right padding kept
+        // tight so the menu width is set by the bars themselves.
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 3),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -3),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+        ])
+        return container
     }
 
     @objc private func showSpawnerDetail(_ sender: NSMenuItem) {
