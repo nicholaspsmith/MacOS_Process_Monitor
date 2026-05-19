@@ -1,8 +1,8 @@
 import AppKit
 import UserNotifications
 
-// macOS per-UID process limit lives in kern.maxprocperuid. We read it once at
-// launch; if anything goes wrong we fall back to 2666 (the typical default).
+// MARK: - Kernel limit
+
 func readProcessLimit() -> Int {
     var size = 0
     sysctlbyname("kern.maxprocperuid", nil, &size, nil, 0)
@@ -11,52 +11,191 @@ func readProcessLimit() -> Int {
     return result == 0 && value > 0 ? Int(value) : 2666
 }
 
-// Counts processes owned by the current user. Mirrors `ps -u $USER | wc -l`
-// (minus the header row). Uses /bin/ps so behavior matches what users see in
-// their own shell — no clever sysctl arithmetic that could drift.
-func currentProcessCount() -> Int? {
+// MARK: - Process snapshot
+
+struct ProcRec {
+    let pid: Int
+    let ppid: Int
+    let user: String
+    let comm: String  // executable basename; can include spaces (e.g. "Google Chrome Helper")
+}
+
+func readAllProcs() -> [ProcRec]? {
     let task = Process()
     task.launchPath = "/bin/ps"
-    task.arguments = ["-u", NSUserName()]
+    task.arguments = ["-axo", "pid,ppid,user,comm", "-ww"]
     let pipe = Pipe()
     task.standardOutput = pipe
     task.standardError = Pipe()
-    do {
-        try task.run()
-    } catch {
-        return nil
-    }
+    do { try task.run() } catch { return nil }
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     task.waitUntilExit()
     guard task.terminationStatus == 0,
-          let text = String(data: data, encoding: .utf8) else {
-        return nil
+          let text = String(data: data, encoding: .utf8) else { return nil }
+
+    var result: [ProcRec] = []
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: true).dropFirst()
+    for line in lines {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let parts = trimmed.split(
+            maxSplits: 3,
+            omittingEmptySubsequences: true,
+            whereSeparator: { $0.isWhitespace }
+        ).map(String.init)
+        guard parts.count == 4,
+              let pid = Int(parts[0]),
+              let ppid = Int(parts[1]) else { continue }
+        result.append(ProcRec(pid: pid, ppid: ppid, user: parts[2], comm: parts[3]))
     }
-    // ps prints a header line; subtract it.
-    let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-    return max(lines.count - 1, 0)
+    return result
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+// MARK: - Top spawners
+
+// Strip the absolute path prefix that `ps -axo comm` returns for most
+// processes (e.g. "/sbin/launchd" → "launchd"), and drop the leading "-"
+// that ps prepends to login shells ("-zsh" → "zsh").
+func displayName(_ comm: String) -> String {
+    var s = comm
+    if s.hasPrefix("-") { s = String(s.dropFirst()) }
+    return (s as NSString).lastPathComponent
+}
+
+// Counts each PID's total descendants (transitive children) by walking the
+// PPID graph. Returns the top N PIDs that actually have descendants, sorted
+// descending. PID 1 (launchd) is excluded — it's the ancestor of nearly
+// every userland process, so it would always pin to the top with no signal.
+func topSpawners(_ all: [ProcRec], topN: Int) -> [(comm: String, pid: Int, descendants: Int)] {
+    var children: [Int: [Int]] = [:]
+    for p in all {
+        children[p.ppid, default: []].append(p.pid)
+    }
+    var counts: [Int: Int] = [:]
+    for p in all where p.pid != 1 {
+        var n = 0
+        var stack = children[p.pid] ?? []
+        while let pid = stack.popLast() {
+            n += 1
+            if let cs = children[pid] { stack.append(contentsOf: cs) }
+        }
+        if n > 0 { counts[p.pid] = n }
+    }
+    return all
+        .compactMap { p -> (comm: String, pid: Int, descendants: Int)? in
+            guard let n = counts[p.pid] else { return nil }
+            return (displayName(p.comm), p.pid, n)
+        }
+        .sorted { $0.descendants > $1.descendants }
+        .prefix(topN)
+        .map { $0 }
+}
+
+// MARK: - Sparkline history
+
+final class CountHistory {
+    private var values: [Int] = []
+    private let maxLen: Int
+    init(maxLen: Int) { self.maxLen = maxLen }
+
+    func record(_ v: Int) {
+        values.append(v)
+        if values.count > maxLen { values.removeFirst() }
+    }
+
+    func sparkline() -> String {
+        let bars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+        guard !values.isEmpty else { return "" }
+        let lo = values.min()!
+        let hi = values.max()!
+        guard hi > lo else {
+            return String(repeating: bars[3], count: values.count)
+        }
+        let span = Double(hi - lo)
+        return values.map { v in
+            let frac = Double(v - lo) / span
+            let idx = min(bars.count - 1, Int(frac * Double(bars.count)))
+            return bars[idx]
+        }.joined()
+    }
+
+    var range: (min: Int, max: Int)? {
+        guard let lo = values.min(), let hi = values.max() else { return nil }
+        return (lo, hi)
+    }
+}
+
+// MARK: - Respawn-loop detector
+
+// Records a per-comm set of PIDs at each poll. Over the rolling window,
+// counts distinct PIDs seen per name. A stable process contributes 1 PID
+// across all snapshots; a name that's crash-respawning contributes many.
+// Threshold > 5 across a 60s window catches sub-second loops (e.g. the
+// contactsd cascade from the May 19 incident) while staying quiet for
+// normal short-lived helpers.
+final class RespawnDetector {
+    private var snapshots: [[String: Set<Int>]] = []
+    private let windowSize: Int
+    private let threshold: Int
+
+    init(windowSize: Int, threshold: Int) {
+        self.windowSize = windowSize
+        self.threshold = threshold
+    }
+
+    func record(_ procs: [ProcRec]) {
+        var byComm: [String: Set<Int>] = [:]
+        for p in procs {
+            byComm[p.comm, default: []].insert(p.pid)
+        }
+        snapshots.append(byComm)
+        if snapshots.count > windowSize { snapshots.removeFirst() }
+    }
+
+    func looping() -> [(comm: String, count: Int)] {
+        var union: [String: Set<Int>] = [:]
+        for snap in snapshots {
+            for (c, pids) in snap {
+                union[c, default: []].formUnion(pids)
+            }
+        }
+        return union
+            .filter { $0.value.count > threshold }
+            .map { (comm: $0.key, count: $0.value.count) }
+            .sorted { $0.count > $1.count }
+    }
+}
+
+// MARK: - App
+
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let limit = readProcessLimit()
     private let warnPct = 85
     private let pollSeconds: TimeInterval = 5
+    private let historyLen = 40                    // ~3.3 min of sparkline at 5s polls
+    private let respawnWindow = 12                 // 60s window at 5s polls
+    private let respawnThreshold = 5               // > N distinct PIDs/window = crash-loop
 
     private var statusItem: NSStatusItem!
+    private var menu: NSMenu!
     private var timer: Timer?
-    private var lastNotifiedAtOrAbove = false  // edge-trigger; renotify only on re-cross
+    private var lastNotifiedAtOrAbove = false
+    private let history: CountHistory
+    private let respawn: RespawnDetector
+    private var latestProcs: [ProcRec] = []
+    private var latestCount = 0
+
+    override init() {
+        history = CountHistory(maxLen: historyLen)
+        respawn = RespawnDetector(windowSize: respawnWindow, threshold: respawnThreshold)
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-            button.title = "…"
-        }
+        statusItem.button?.attributedTitle = NSAttributedString(string: "…")
 
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Open Activity Monitor", action: #selector(openActivityMonitor), keyEquivalent: "a"))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu = NSMenu()
+        menu.delegate = self
         statusItem.menu = menu
 
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
@@ -67,20 +206,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: Menu (lazy rebuild on open)
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+
+        // Sparkline (informational)
+        let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let spark = history.sparkline()
+        let sparkText: String = {
+            if let r = history.range, r.max > r.min {
+                return "History  \(spark)   \(r.min)→\(r.max)"
+            }
+            return "History  \(spark)"
+        }()
+        let sparkItem = NSMenuItem(title: sparkText, action: nil, keyEquivalent: "")
+        sparkItem.attributedTitle = NSAttributedString(
+            string: sparkText,
+            attributes: [.font: mono, .foregroundColor: NSColor.secondaryLabelColor]
+        )
+        menu.addItem(sparkItem)
+
+        // Crash-loop section (only when present)
+        let loops = respawn.looping()
+        if !loops.isEmpty {
+            let header = NSMenuItem(title: "⚠ Crash-looping (\(loops.count))", action: nil, keyEquivalent: "")
+            header.attributedTitle = NSAttributedString(
+                string: "⚠ Crash-looping (\(loops.count))",
+                attributes: [.foregroundColor: NSColor.systemRed]
+            )
+            let sub = NSMenu()
+            for l in loops.prefix(10) {
+                let line = "\(displayName(l.comm))  —  \(l.count) PIDs in \(respawnWindow * Int(pollSeconds))s"
+                sub.addItem(NSMenuItem(title: line, action: nil, keyEquivalent: ""))
+            }
+            header.submenu = sub
+            menu.addItem(header)
+        }
+
+        // Top spawners
+        let spawners = topSpawners(latestProcs, topN: 10)
+        let spawnHeader = NSMenuItem(title: "Top spawners", action: nil, keyEquivalent: "")
+        let spawnSub = NSMenu()
+        if spawners.isEmpty {
+            spawnSub.addItem(NSMenuItem(title: "(none)", action: nil, keyEquivalent: ""))
+        } else {
+            for s in spawners {
+                let line = "\(s.comm) [\(s.pid)]  —  \(s.descendants) desc"
+                spawnSub.addItem(NSMenuItem(title: line, action: nil, keyEquivalent: ""))
+            }
+        }
+        spawnHeader.submenu = spawnSub
+        menu.addItem(spawnHeader)
+
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Open Activity Monitor", action: #selector(openActivityMonitor), keyEquivalent: "a"))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
     @objc private func openActivityMonitor() {
         let url = URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
         NSWorkspace.shared.open(url)
     }
 
+    // MARK: Polling
+
     private func refresh() {
-        guard let button = statusItem.button else { return }
-        guard let count = currentProcessCount() else {
-            button.attributedTitle = NSAttributedString(string: "ps?")
+        guard let all = readAllProcs() else {
+            statusItem.button?.attributedTitle = NSAttributedString(string: "ps?")
             return
         }
+        latestProcs = all
+        let user = NSUserName()
+        let count = all.reduce(0) { $0 + ($1.user == user ? 1 : 0) }
+        latestCount = count
+        history.record(count)
+        respawn.record(all)
+
         let pct = count * 100 / limit
         let color: NSColor = pct >= warnPct ? .systemRed : .labelColor
-        button.attributedTitle = NSAttributedString(
+        statusItem.button?.attributedTitle = NSAttributedString(
             string: "\(count)/\(limit) (\(pct)%)",
             attributes: [
                 .foregroundColor: color,
@@ -94,7 +300,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 lastNotifiedAtOrAbove = true
             }
         } else if pct < warnPct - 5 {
-            // 5pt hysteresis so a single bounce around the threshold doesn't spam.
             lastNotifiedAtOrAbove = false
         }
     }
@@ -116,5 +321,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
-app.setActivationPolicy(.accessory)  // no Dock icon
+app.setActivationPolicy(.accessory)
 app.run()
