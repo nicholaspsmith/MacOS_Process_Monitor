@@ -126,20 +126,36 @@ final class CountHistory {
 
 // MARK: - Respawn-loop detector
 
-// Records a per-comm set of PIDs at each poll. Over the rolling window,
-// counts distinct PIDs seen per name. A stable process contributes 1 PID
-// across all snapshots; a name that's crash-respawning contributes many.
-// Threshold > 5 across a 60s window catches sub-second loops (e.g. the
-// contactsd cascade from the May 19 incident) while staying quiet for
-// normal short-lived helpers.
+// Records per-comm PIDs at each poll, then flags names that look like a
+// crash loop rather than a worker pool. Two patterns we need to tell apart:
+//
+//   crash loop:  peak simultaneous ≈ 1, but many distinct PIDs over time
+//                (one slot keeps getting replaced — what contactsd did
+//                during the May 19 incident).
+//
+//   worker pool: peak simultaneous = N, many distinct PIDs over time
+//                (mdworker_shared, plugin-container, ExtensionKit
+//                helpers — all designed to be short-lived).
+//
+// The discriminator is `distinct / peak`: how many times each slot was
+// replaced inside the window. Flag only when that ratio is high enough
+// that normal short-lived helpers don't trip it.
+//
+// Also excluded: `ps` (we spawn it every poll, so it'd always self-flag)
+// and `<defunct>` (a state, not an identity — every reaped zombie ends
+// up there regardless of original name).
 final class RespawnDetector {
     private var snapshots: [[String: Set<Int>]] = []
     private let windowSize: Int
-    private let threshold: Int
+    private let minDistinct: Int
+    private let minChurnRatio: Int
 
-    init(windowSize: Int, threshold: Int) {
+    private static let excluded: Set<String> = ["ps", "<defunct>"]
+
+    init(windowSize: Int, minDistinct: Int, minChurnRatio: Int) {
         self.windowSize = windowSize
-        self.threshold = threshold
+        self.minDistinct = minDistinct
+        self.minChurnRatio = minChurnRatio
     }
 
     func record(_ procs: [ProcRec]) {
@@ -151,17 +167,30 @@ final class RespawnDetector {
         if snapshots.count > windowSize { snapshots.removeFirst() }
     }
 
-    func looping() -> [(comm: String, count: Int)] {
+    struct Looping {
+        let comm: String
+        let distinct: Int
+        let peak: Int
+    }
+
+    func looping() -> [Looping] {
         var union: [String: Set<Int>] = [:]
+        var peak: [String: Int] = [:]
         for snap in snapshots {
             for (c, pids) in snap {
                 union[c, default: []].formUnion(pids)
+                peak[c] = max(peak[c] ?? 0, pids.count)
             }
         }
-        return union
-            .filter { $0.value.count > threshold }
-            .map { (comm: $0.key, count: $0.value.count) }
-            .sorted { $0.count > $1.count }
+        return union.compactMap { (c, pids) -> Looping? in
+            let basename = (c as NSString).lastPathComponent
+            if Self.excluded.contains(basename) { return nil }
+            let distinct = pids.count
+            let p = max(peak[c] ?? 1, 1)
+            guard distinct > minDistinct, distinct / p >= minChurnRatio else { return nil }
+            return Looping(comm: c, distinct: distinct, peak: p)
+        }
+        .sorted { $0.distinct > $1.distinct }
     }
 }
 
@@ -173,7 +202,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let pollSeconds: TimeInterval = 5
     private let historyLen = 40                    // ~3.3 min of sparkline at 5s polls
     private let respawnWindow = 12                 // 60s window at 5s polls
-    private let respawnThreshold = 5               // > N distinct PIDs/window = crash-loop
+    private let respawnMinDistinct = 5             // need at least this many PIDs over the window
+    private let respawnMinChurnRatio = 5           // and distinct/peak >= this (slot replaced N times)
 
     private var statusItem: NSStatusItem!
     private var menu: NSMenu!
@@ -186,7 +216,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     override init() {
         history = CountHistory(maxLen: historyLen)
-        respawn = RespawnDetector(windowSize: respawnWindow, threshold: respawnThreshold)
+        respawn = RespawnDetector(
+            windowSize: respawnWindow,
+            minDistinct: respawnMinDistinct,
+            minChurnRatio: respawnMinChurnRatio
+        )
         super.init()
     }
 
@@ -237,7 +271,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             )
             let sub = NSMenu()
             for l in loops.prefix(10) {
-                let line = "\(displayName(l.comm))  —  \(l.count) PIDs in \(respawnWindow * Int(pollSeconds))s"
+                let windowSec = respawnWindow * Int(pollSeconds)
+                let line = "\(displayName(l.comm))  —  \(l.distinct) PIDs / peak \(l.peak) live  (in \(windowSec)s)"
                 sub.addItem(NSMenuItem(title: line, action: nil, keyEquivalent: ""))
             }
             header.submenu = sub
