@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import UserNotifications
 
 // MARK: - Kernel limit
@@ -17,13 +18,14 @@ struct ProcRec {
     let pid: Int
     let ppid: Int
     let user: String
-    let comm: String  // executable basename; can include spaces (e.g. "Google Chrome Helper")
+    let etime: String  // elapsed time since start, e.g. "01:23" or "1-02:34:56"
+    let comm: String   // executable basename; can include spaces (e.g. "Google Chrome Helper")
 }
 
 func readAllProcs() -> [ProcRec]? {
     let task = Process()
     task.launchPath = "/bin/ps"
-    task.arguments = ["-axo", "pid,ppid,user,comm", "-ww"]
+    task.arguments = ["-axo", "pid,ppid,user,etime,comm", "-ww"]
     let pipe = Pipe()
     task.standardOutput = pipe
     task.standardError = Pipe()
@@ -37,15 +39,16 @@ func readAllProcs() -> [ProcRec]? {
     let lines = text.split(separator: "\n", omittingEmptySubsequences: true).dropFirst()
     for line in lines {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
+        // First 4 tokens are pid/ppid/user/etime; everything after is comm (may contain spaces).
         let parts = trimmed.split(
-            maxSplits: 3,
+            maxSplits: 4,
             omittingEmptySubsequences: true,
             whereSeparator: { $0.isWhitespace }
         ).map(String.init)
-        guard parts.count == 4,
+        guard parts.count == 5,
               let pid = Int(parts[0]),
               let ppid = Int(parts[1]) else { continue }
-        result.append(ProcRec(pid: pid, ppid: ppid, user: parts[2], comm: parts[3]))
+        result.append(ProcRec(pid: pid, ppid: ppid, user: parts[2], etime: parts[3], comm: parts[4]))
     }
     return result
 }
@@ -200,7 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let limit = readProcessLimit()
     private let warnPct = 85
     private let pollSeconds: TimeInterval = 5
-    private let historyLen = 40                    // ~3.3 min of sparkline at 5s polls
+    private let historyLen = 25                    // ~2 min of sparkline at 5s polls (narrower menu)
     private let respawnWindow = 12                 // 60s window at 5s polls
     private let respawnMinDistinct = 5             // need at least this many PIDs over the window
     private let respawnMinChurnRatio = 5           // and distinct/peak >= this (slot replaced N times)
@@ -213,6 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let respawn: RespawnDetector
     private var latestProcs: [ProcRec] = []
     private var latestCount = 0
+    private var detailWindows: [ProcessDetailWindowController] = []
 
     override init() {
         history = CountHistory(maxLen: historyLen)
@@ -279,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(header)
         }
 
-        // Top spawners
+        // Top spawners — clickable; opens a detail window with kill actions.
         let spawners = topSpawners(latestProcs, topN: 10)
         let spawnHeader = NSMenuItem(title: "Top spawners", action: nil, keyEquivalent: "")
         let spawnSub = NSMenu()
@@ -288,7 +292,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             for s in spawners {
                 let line = "\(s.comm) [\(s.pid)]  —  \(s.descendants) desc"
-                spawnSub.addItem(NSMenuItem(title: line, action: nil, keyEquivalent: ""))
+                let item = NSMenuItem(title: line, action: #selector(showSpawnerDetail(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = NSNumber(value: s.pid)
+                spawnSub.addItem(item)
             }
         }
         spawnHeader.submenu = spawnSub
@@ -296,8 +303,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Open Activity Monitor", action: #selector(openActivityMonitor), keyEquivalent: "a"))
+
+        // Start at Login toggle. Reflects current SMAppService status.
+        let loginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
+        loginItem.target = self
+        loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        menu.addItem(loginItem)
+
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    @objc private func showSpawnerDetail(_ sender: NSMenuItem) {
+        guard let pid = (sender.representedObject as? NSNumber)?.intValue else { return }
+        let controller = ProcessDetailWindowController(pid: pid) { [weak self] closed in
+            self?.detailWindows.removeAll { $0 === closed }
+        }
+        detailWindows.append(controller)
+        controller.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func toggleLoginItem() {
+        let svc = SMAppService.mainApp
+        do {
+            if svc.status == .enabled {
+                try svc.unregister()
+            } else {
+                try svc.register()
+            }
+        } catch {
+            // Most common failure: app isn't in /Applications or ~/Applications.
+            let alert = NSAlert()
+            alert.messageText = "Couldn't toggle Start at Login"
+            alert.informativeText = """
+            \(error.localizedDescription)
+
+            macOS requires the app to live in /Applications or ~/Applications for this to work. Move ProcessMonitor.app there and try again.
+            """
+            alert.alertStyle = .warning
+            alert.runModal()
+        }
     }
 
     @objc private func openActivityMonitor() {
