@@ -322,7 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Left indent mirrors NSMenu's standard title position; right padding
         // is kept tight so the menu width tracks the bars themselves.
         let leftPad: CGFloat = 20
-        let rightPad: CGFloat = 8
+        let rightPad: CGFloat = 16
         let vPad: CGFloat = 3
 
         let label = NSTextField(labelWithString: text)
