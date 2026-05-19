@@ -55,7 +55,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Open Activity Monitor", action: #selector(openActivityMonitor), keyEquivalent: "a"))
-        menu.addItem(NSMenuItem(title: "Refresh now", action: #selector(refreshNow), keyEquivalent: "r"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -68,22 +67,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func refreshNow() {
-        refresh()
-    }
-
     @objc private func openActivityMonitor() {
         let url = URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
         NSWorkspace.shared.open(url)
     }
 
     private func refresh() {
+        guard let button = statusItem.button else { return }
         guard let count = currentProcessCount() else {
-            statusItem.button?.title = "ps?"
+            button.attributedTitle = NSAttributedString(string: "ps?")
             return
         }
         let pct = count * 100 / limit
-        statusItem.button?.title = "\(count)/\(limit) (\(pct)%)"
+        let color: NSColor = pct >= warnPct ? .systemRed : .labelColor
+        button.attributedTitle = NSAttributedString(
+            string: "\(count)/\(limit) (\(pct)%)",
+            attributes: [
+                .foregroundColor: color,
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+            ]
+        )
 
         if pct >= warnPct {
             if !lastNotifiedAtOrAbove {
