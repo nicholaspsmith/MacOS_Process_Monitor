@@ -315,23 +315,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Wraps a label in an NSView sized to its intrinsic content. Used so the
     // sparkline item escapes NSMenu's standard layout (where every row
     // reserves columns for checkmark + shortcut indicator alignment).
+    // Uses explicit frames rather than constraints — NSMenu reads the view's
+    // frame at insertion time, before any auto-layout pass would have run, so
+    // a constraint-only view ends up zero-sized and invisible.
     private func makeSparklineView(text: String, font: NSFont) -> NSView {
+        // Left indent mirrors NSMenu's standard title position; right padding
+        // is kept tight so the menu width tracks the bars themselves.
+        let leftPad: CGFloat = 20
+        let rightPad: CGFloat = 8
+        let vPad: CGFloat = 3
+
         let label = NSTextField(labelWithString: text)
         label.font = font
         label.textColor = .secondaryLabelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
+        let labelSize = label.intrinsicContentSize
+        label.frame = NSRect(x: leftPad, y: vPad, width: labelSize.width, height: labelSize.height)
 
-        let container = NSView()
+        let container = NSView(frame: NSRect(
+            x: 0, y: 0,
+            width: labelSize.width + leftPad + rightPad,
+            height: labelSize.height + vPad * 2
+        ))
         container.addSubview(label)
-        // Left padding mirrors NSMenu's standard title indent so the sparkline
-        // visually aligns with the text in adjacent items. Right padding kept
-        // tight so the menu width is set by the bars themselves.
-        NSLayoutConstraint.activate([
-            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 3),
-            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -3),
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-        ])
         return container
     }
 
