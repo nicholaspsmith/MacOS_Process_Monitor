@@ -446,6 +446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Helper to render text and clear any image.
         func renderText(_ s: String) {
             button.image = nil
+            button.imagePosition = .noImage
             button.contentTintColor = nil
             button.attributedTitle = NSAttributedString(
                 string: s,
@@ -478,6 +479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func renderSymbol(_ name: String, warn: Bool) {
         guard let button = statusItem.button else { return }
         button.attributedTitle = NSAttributedString(string: "")
+        button.imagePosition = .imageOnly
         let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
         let image = NSImage(systemSymbolName: name, accessibilityDescription: "Process usage")?
             .withSymbolConfiguration(config)
