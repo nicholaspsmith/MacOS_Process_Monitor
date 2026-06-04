@@ -197,6 +197,25 @@ final class RespawnDetector {
     }
 }
 
+// MARK: - Settings
+
+/// How the menu bar status item is rendered. Persisted in UserDefaults.
+enum DisplayMode: String {
+    case countTotalPct   // "1234/2666 (46%)"  — default
+    case countTotal      // "1234/2666"
+    case percent         // "46%"
+    case gauge           // custom-drawn speedometer (needle) reflecting pct
+    case arc             // custom-drawn radial arc filled proportionally to pct
+    case pie             // custom-drawn pie: filled wedge = in use, circle outline = cap
+    case wedge           // custom-drawn pie: solid wedge = in use, faint disk = remaining cap
+
+    private static let storageKey = "displayMode"
+    static var current: DisplayMode {
+        get { UserDefaults.standard.string(forKey: storageKey).flatMap(DisplayMode.init) ?? .countTotalPct }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: storageKey) }
+    }
+}
+
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -299,6 +318,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         spawnHeader.submenu = spawnSub
         menu.addItem(spawnHeader)
 
+        // Display mode submenu (mirrors the Start at Login pattern: read current
+        // setting for checkmark state; action writes it and re-renders).
+        menu.addItem(NSMenuItem.separator())
+        let displayHeader = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
+        let displaySub = NSMenu()
+        let modes: [(DisplayMode, String)] = [
+            (.countTotalPct, "Count / Total (%)"),
+            (.countTotal, "Count / Total"),
+            (.percent, "Percent"),
+            (.gauge, "Gauge (needle)"),
+            (.arc, "Gauge (arc)"),
+            (.pie, "Pie (outline)"),
+            (.wedge, "Pie (filled)"),
+        ]
+        let activeMode = DisplayMode.current
+        for (mode, label) in modes {
+            let item = NSMenuItem(title: label, action: #selector(setDisplayMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = (mode == activeMode) ? .on : .off
+            displaySub.addItem(item)
+        }
+        displayHeader.submenu = displaySub
+        menu.addItem(displayHeader)
+
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Open Activity Monitor", action: #selector(openActivityMonitor), keyEquivalent: "a"))
 
@@ -385,6 +429,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(url)
     }
 
+    @objc private func setDisplayMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let mode = DisplayMode(rawValue: raw) else { return }
+        DisplayMode.current = mode
+        rerenderFromCache()
+    }
+
+    private func rerenderFromCache() {
+        let pct = limit > 0 ? latestCount * 100 / limit : 0
+        renderStatusItem(count: latestCount, limit: limit, pct: pct, warn: pct >= warnPct)
+    }
+
     // MARK: Polling
 
     private func refresh() {
@@ -400,14 +455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         respawn.record(all)
 
         let pct = count * 100 / limit
-        let color: NSColor = pct >= warnPct ? .systemRed : .labelColor
-        statusItem.button?.attributedTitle = NSAttributedString(
-            string: "\(count)/\(limit) (\(pct)%)",
-            attributes: [
-                .foregroundColor: color,
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
-            ]
-        )
+        renderStatusItem(count: count, limit: limit, pct: pct, warn: pct >= warnPct)
 
         if pct >= warnPct {
             if !lastNotifiedAtOrAbove {
@@ -417,6 +465,194 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if pct < warnPct - 5 {
             lastNotifiedAtOrAbove = false
         }
+    }
+
+    private func renderStatusItem(count: Int, limit: Int, pct: Int, warn: Bool) {
+        guard let button = statusItem.button else { return }
+        let mode = DisplayMode.current
+
+        // Helper to render text and clear any image.
+        func renderText(_ s: String) {
+            button.image = nil
+            button.imagePosition = .noImage
+            button.contentTintColor = nil
+            button.attributedTitle = NSAttributedString(
+                string: s,
+                attributes: [
+                    .foregroundColor: warn ? NSColor.systemRed : NSColor.labelColor,
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+                ]
+            )
+        }
+
+        switch mode {
+        case .countTotalPct:
+            renderText("\(count)/\(limit) (\(pct)%)")
+        case .countTotal:
+            renderText("\(count)/\(limit)")
+        case .percent:
+            renderText("\(pct)%")
+        case .gauge:
+            renderIcon(makeGaugeImage(pct: pct))
+        case .arc:
+            renderIcon(makeArcImage(pct: pct))
+        case .pie:
+            renderIcon(makePieImage(pct: pct))
+        case .wedge:
+            renderIcon(makeWedgeImage(pct: pct))
+        }
+    }
+
+    // Sets an icon image on the status item (mutually exclusive with text).
+    // Icons are full-color (non-template), so contentTintColor is cleared.
+    private func renderIcon(_ image: NSImage) {
+        guard let button = statusItem.button else { return }
+        button.attributedTitle = NSAttributedString(string: "")
+        button.imagePosition = .imageOnly
+        button.contentTintColor = nil
+        button.image = image
+    }
+
+    // Severity color for the data-driven icons: green when well under the cap,
+    // orange as it climbs, red once usage reaches the warn threshold.
+    private func meterColor(pct: Int) -> NSColor {
+        if pct >= warnPct { return .systemRed }
+        if pct >= 50 { return .systemOrange }
+        return .systemGreen
+    }
+
+    // Speedometer gauge: needle angle is proportional to pct. Full-color
+    // (non-template); severity drives the color, alpha separates track vs needle.
+    private func makeGaugeImage(pct: Int) -> NSImage {
+        let frac = CGFloat(max(0, min(100, pct))) / 100
+        let color = meterColor(pct: pct)
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let center = NSPoint(x: rect.midX, y: rect.midY - 1.5)
+            let radius: CGFloat = 6.5
+            // Arc spanning ~250°, open at the bottom (lower-left to lower-right over the top).
+            let startAngle: CGFloat = 215
+            let endAngle: CGFloat = -35
+            let track = NSBezierPath()
+            track.appendArc(withCenter: center, radius: radius,
+                            startAngle: startAngle, endAngle: endAngle, clockwise: true)
+            track.lineWidth = 2.4
+            track.lineCapStyle = .round
+            color.withAlphaComponent(0.28).set()
+            track.stroke()
+            // Needle: interpolate from arc start (0%) to arc end (100%).
+            color.set()
+            let needleAngle = (startAngle + (endAngle - startAngle) * frac) * .pi / 180
+            let tip = NSPoint(x: center.x + cos(needleAngle) * (radius - 0.3),
+                              y: center.y + sin(needleAngle) * (radius - 0.3))
+            let needle = NSBezierPath()
+            needle.move(to: center)
+            needle.line(to: tip)
+            needle.lineWidth = 2.8
+            needle.lineCapStyle = .round
+            needle.stroke()
+            // Center hub.
+            let hubR: CGFloat = 2.3
+            NSBezierPath(ovalIn: NSRect(x: center.x - hubR, y: center.y - hubR,
+                                        width: hubR * 2, height: hubR * 2)).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    // Radial arc: faint full track + bold arc filled proportionally to pct.
+    // Full-color (non-template); severity drives the color, alpha separates
+    // filled vs track.
+    private func makeArcImage(pct: Int) -> NSImage {
+        let frac = CGFloat(max(0, min(100, pct))) / 100
+        let color = meterColor(pct: pct)
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let center = NSPoint(x: rect.midX, y: rect.midY - 1.5)
+            let radius: CGFloat = 6.5
+            let startAngle: CGFloat = 215
+            let endAngle: CGFloat = -35
+            let lineWidth: CGFloat = 3.4
+            // Faint full track.
+            let track = NSBezierPath()
+            track.appendArc(withCenter: center, radius: radius,
+                            startAngle: startAngle, endAngle: endAngle, clockwise: true)
+            track.lineWidth = lineWidth
+            track.lineCapStyle = .round
+            color.withAlphaComponent(0.28).set()
+            track.stroke()
+            // Bold filled portion from the start up to the current fraction.
+            if frac > 0 {
+                let fillEnd = startAngle + (endAngle - startAngle) * frac
+                let fill = NSBezierPath()
+                fill.appendArc(withCenter: center, radius: radius,
+                               startAngle: startAngle, endAngle: fillEnd, clockwise: true)
+                fill.lineWidth = lineWidth
+                fill.lineCapStyle = .round
+                color.set()
+                fill.stroke()
+            }
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    // Pie: full circle outline = per-UID cap; filled wedge = fraction in use.
+    // Full-color (non-template); severity drives the color.
+    private func makePieImage(pct: Int) -> NSImage {
+        let frac = CGFloat(max(0, min(100, pct))) / 100
+        let color = meterColor(pct: pct)
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            let radius: CGFloat = 7
+            color.set()
+            let circle = NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius,
+                                                     width: radius * 2, height: radius * 2))
+            circle.lineWidth = 2.2
+            circle.stroke()
+            // Filled wedge from 12 o'clock, clockwise, proportional to pct.
+            if frac > 0 {
+                let wedgeRadius = radius - 1.4
+                let wedge = NSBezierPath()
+                wedge.move(to: center)
+                wedge.appendArc(withCenter: center, radius: wedgeRadius,
+                                startAngle: 90, endAngle: 90 - 360 * frac, clockwise: true)
+                wedge.close()
+                wedge.fill()
+            }
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    // Pie variant: solid wedge = fraction in use; faint full disk = remaining cap.
+    // Full-color (non-template); severity drives the color, alpha separates
+    // wedge vs remainder.
+    private func makeWedgeImage(pct: Int) -> NSImage {
+        let frac = CGFloat(max(0, min(100, pct))) / 100
+        let color = meterColor(pct: pct)
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            let radius: CGFloat = 7.5
+            // Faint full disk = total capacity.
+            color.withAlphaComponent(0.28).set()
+            NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius,
+                                        width: radius * 2, height: radius * 2)).fill()
+            // Solid wedge from 12 o'clock, clockwise, proportional to pct.
+            if frac > 0 {
+                let wedge = NSBezierPath()
+                wedge.move(to: center)
+                wedge.appendArc(withCenter: center, radius: radius,
+                                startAngle: 90, endAngle: 90 - 360 * frac, clockwise: true)
+                wedge.close()
+                color.set()
+                wedge.fill()
+            }
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 
     private func notify(count: Int, pct: Int) {
