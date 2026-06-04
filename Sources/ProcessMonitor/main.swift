@@ -326,6 +326,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         spawnHeader.submenu = spawnSub
         menu.addItem(spawnHeader)
 
+        // Display mode submenu (mirrors the Start at Login pattern: read current
+        // setting for checkmark state; action writes it and re-renders).
+        menu.addItem(NSMenuItem.separator())
+        let displayHeader = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
+        let displaySub = NSMenu()
+        let modes: [(DisplayMode, String)] = [
+            (.countTotalPct, "Count / Total (%)"),
+            (.countTotal, "Count / Total"),
+            (.percent, "Percent"),
+            (.iconOnly, "Icon only"),
+        ]
+        let activeMode = DisplayMode.current
+        for (mode, label) in modes {
+            let item = NSMenuItem(title: label, action: #selector(setDisplayMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = (mode == activeMode) ? .on : .off
+            displaySub.addItem(item)
+        }
+        if activeMode == .iconOnly {
+            displaySub.addItem(NSMenuItem.separator())
+            let iconHeader = NSMenuItem(title: "Icon style", action: nil, keyEquivalent: "")
+            let iconSub = NSMenu()
+            let styles: [(IconStyle, String)] = [
+                (.gauge, "Gauge"),
+                (.chart, "Chart"),
+                (.number, "Number"),
+            ]
+            let activeStyle = IconStyle.current
+            for (style, label) in styles {
+                let item = NSMenuItem(title: label, action: #selector(setIconStyle(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = style.rawValue
+                item.state = (style == activeStyle) ? .on : .off
+                iconSub.addItem(item)
+            }
+            iconHeader.submenu = iconSub
+            displaySub.addItem(iconHeader)
+        }
+        displayHeader.submenu = displaySub
+        menu.addItem(displayHeader)
+
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Open Activity Monitor", action: #selector(openActivityMonitor), keyEquivalent: "a"))
 
@@ -410,6 +452,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openActivityMonitor() {
         let url = URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
         NSWorkspace.shared.open(url)
+    }
+
+    @objc private func setDisplayMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let mode = DisplayMode(rawValue: raw) else { return }
+        DisplayMode.current = mode
+        rerenderFromCache()
+    }
+
+    @objc private func setIconStyle(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let style = IconStyle(rawValue: raw) else { return }
+        IconStyle.current = style
+        rerenderFromCache()
+    }
+
+    private func rerenderFromCache() {
+        let pct = limit > 0 ? latestCount * 100 / limit : 0
+        renderStatusItem(count: latestCount, limit: limit, pct: pct, warn: pct >= warnPct)
     }
 
     // MARK: Polling
