@@ -204,8 +204,10 @@ enum DisplayMode: String {
     case countTotalPct   // "1234/2666 (46%)"  — default
     case countTotal      // "1234/2666"
     case percent         // "46%"
-    case gauge           // custom-drawn speedometer reflecting pct
-    case pie             // custom-drawn pie: filled wedge = in use, full circle = cap
+    case gauge           // custom-drawn speedometer (needle) reflecting pct
+    case arc             // custom-drawn radial arc filled proportionally to pct
+    case pie             // custom-drawn pie: filled wedge = in use, circle outline = cap
+    case wedge           // custom-drawn pie: solid wedge = in use, faint disk = remaining cap
 
     private static let storageKey = "displayMode"
     static var current: DisplayMode {
@@ -325,8 +327,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (.countTotalPct, "Count / Total (%)"),
             (.countTotal, "Count / Total"),
             (.percent, "Percent"),
-            (.gauge, "Gauge"),
-            (.pie, "Pie"),
+            (.gauge, "Gauge (needle)"),
+            (.arc, "Gauge (arc)"),
+            (.pie, "Pie (outline)"),
+            (.wedge, "Pie (filled)"),
         ]
         let activeMode = DisplayMode.current
         for (mode, label) in modes {
@@ -490,8 +494,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             renderText("\(pct)%")
         case .gauge:
             renderIcon(makeGaugeImage(pct: pct, warn: warn), warn: warn)
+        case .arc:
+            renderIcon(makeArcImage(pct: pct, warn: warn), warn: warn)
         case .pie:
             renderIcon(makePieImage(pct: pct, warn: warn), warn: warn)
+        case .wedge:
+            renderIcon(makeWedgeImage(pct: pct, warn: warn), warn: warn)
         }
     }
 
@@ -541,6 +549,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return image
     }
 
+    // Radial arc: faint full track + bold arc filled proportionally to pct.
+    // Template image — alpha differentiates filled vs track; tint comes from the
+    // menu bar / contentTintColor.
+    private func makeArcImage(pct: Int, warn: Bool) -> NSImage {
+        let frac = CGFloat(max(0, min(100, pct))) / 100
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let center = NSPoint(x: rect.midX, y: rect.midY - 1.5)
+            let radius: CGFloat = 6.5
+            let startAngle: CGFloat = 215
+            let endAngle: CGFloat = -35
+            let lineWidth: CGFloat = warn ? 3.0 : 2.4
+            // Faint full track.
+            let track = NSBezierPath()
+            track.appendArc(withCenter: center, radius: radius,
+                            startAngle: startAngle, endAngle: endAngle, clockwise: true)
+            track.lineWidth = lineWidth
+            track.lineCapStyle = .round
+            NSColor.black.withAlphaComponent(0.3).set()
+            track.stroke()
+            // Bold filled portion from the start up to the current fraction.
+            if frac > 0 {
+                let fillEnd = startAngle + (endAngle - startAngle) * frac
+                let fill = NSBezierPath()
+                fill.appendArc(withCenter: center, radius: radius,
+                               startAngle: startAngle, endAngle: fillEnd, clockwise: true)
+                fill.lineWidth = lineWidth
+                fill.lineCapStyle = .round
+                NSColor.black.set()
+                fill.stroke()
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
     // Pie: full circle outline = per-UID cap; filled wedge = fraction in use.
     private func makePieImage(pct: Int, warn: Bool) -> NSImage {
         let frac = CGFloat(max(0, min(100, pct))) / 100
@@ -560,6 +604,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 wedge.appendArc(withCenter: center, radius: wedgeRadius,
                                 startAngle: 90, endAngle: 90 - 360 * frac, clockwise: true)
                 wedge.close()
+                wedge.fill()
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
+    // Pie variant: solid wedge = fraction in use; faint full disk = remaining cap.
+    // Template image — alpha differentiates wedge vs remainder.
+    private func makeWedgeImage(pct: Int, warn: Bool) -> NSImage {
+        let frac = CGFloat(max(0, min(100, pct))) / 100
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            let radius: CGFloat = 7
+            // Faint full disk = total capacity.
+            NSColor.black.withAlphaComponent(0.28).set()
+            NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius,
+                                        width: radius * 2, height: radius * 2)).fill()
+            // Solid wedge from 12 o'clock, clockwise, proportional to pct.
+            if frac > 0 {
+                let wedge = NSBezierPath()
+                wedge.move(to: center)
+                wedge.appendArc(withCenter: center, radius: radius,
+                                startAngle: 90, endAngle: 90 - 360 * frac, clockwise: true)
+                wedge.close()
+                NSColor.black.set()
                 wedge.fill()
             }
             return true
