@@ -197,6 +197,33 @@ final class RespawnDetector {
     }
 }
 
+// MARK: - Settings
+
+enum DisplayMode: String {
+    case countTotalPct   // "1234/2666 (46%)"  — default
+    case countTotal      // "1234/2666"
+    case percent         // "46%"
+    case iconOnly        // SF Symbol or bare number, per IconStyle
+
+    static let storageKey = "displayMode"
+    static var current: DisplayMode {
+        get { UserDefaults.standard.string(forKey: storageKey).flatMap(DisplayMode.init) ?? .countTotalPct }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: storageKey) }
+    }
+}
+
+enum IconStyle: String {
+    case gauge           // gauge SF Symbol — default
+    case chart           // chart.bar SF Symbol
+    case number          // bare percent number, no "%"
+
+    static let storageKey = "iconStyle"
+    static var current: IconStyle {
+        get { UserDefaults.standard.string(forKey: storageKey).flatMap(IconStyle.init) ?? .gauge }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: storageKey) }
+    }
+}
+
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
