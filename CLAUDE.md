@@ -80,30 +80,38 @@ a menu item view.
 
 **Status-item rendering is funnelled through one entry point so the
 display can be user-configurable.** All status-item drawing goes through
-`renderStatusItem(count:limit:pct:warn:)` (with a `renderSymbol(_:warn:)`
-helper); what it produces is driven by two `UserDefaults`-backed enums,
-`DisplayMode` and `IconStyle` (keys `displayMode` / `iconStyle`).
-They default to `.countTotalPct` / `.gauge`, so existing installs keep
-the original `<count>/<limit> (<pct>%)` text behavior untouched. The two
-render paths are **mutually exclusive** and must stay that way: text
-modes (Count/Total (%), Count/Total, Percent, Icon→Number) draw via
-`attributedTitle` — red foreground when usage ≥ `warnPct` — while icon
-modes (gauge, chart) draw a template SF Symbol via `button.image`, use
-`button.contentTintColor = .systemRed` for the warning state, and swap
-to heavier glyph variants (`gauge.with.dots.needle.100percent`,
-`chart.bar.fill`) when warning. Set `imagePosition` explicitly on every
-path (`.noImage` for text, `.imageOnly` for icons) — otherwise the
-unused half leaves stray title spacing in the bar.
+`renderStatusItem(count:limit:pct:warn:)`, which switches on a single
+`UserDefaults`-backed enum, `DisplayMode` (key `displayMode`, default
+`.countTotalPct` so existing installs keep the original
+`<count>/<limit> (<pct>%)` text). There are seven modes: three text
+(`countTotalPct`, `countTotal`, `percent`) and four data-driven icons
+(`gauge` = needle, `arc` = filled radial arc, `pie` = circle outline +
+wedge, `wedge` = solid wedge on a faint disk). The text path and the
+icon path are **mutually exclusive** and must stay that way: text modes
+draw via `attributedTitle` (red foreground when usage ≥ `warnPct`);
+icon modes set `button.image` via `renderIcon(_:)`. Set `imagePosition`
+explicitly on every path (`.noImage` for text, `.imageOnly` for icons) —
+otherwise the unused half leaves stray title spacing in the bar.
+
+**The icons are custom-drawn, full-color, and encode `count/limit`
+live.** Each icon is built with `NSImage(size:flipped:drawingHandler:)`
+in a `make…Image(pct:)` function using `NSBezierPath` (arcs/wedges sized
+to `pct`). They are **non-template** (`isTemplate = false`) because color
+carries information: `meterColor(pct:)` returns green below 50%, orange
+below `warnPct`, red at/above it — so the icon itself signals severity,
+which is also why icon modes don't use the text path's `contentTintColor`
+red-tint trick (`renderIcon` clears it). The faint track/remainder is the
+same hue at low alpha so each glyph reads as one object. SF Symbols were
+tried first but can't do a data-proportional fill, hence the hand drawing.
 
 **The "Display" submenu is built lazily like the rest of the menu, and
 mode changes re-render from cache.** It's assembled in
-`menuNeedsUpdate(_:)` alongside everything else; the nested "Icon style"
-submenu is only added when `displayMode == iconOnly`, so users never see
-icon-style choices that wouldn't apply. Each menu action writes its
-UserDefaults key and then calls `rerenderFromCache()` — that repaints
-the status item from the last polled values immediately, rather than
-making the user wait for the next 5s poll to see their choice take
-effect.
+`menuNeedsUpdate(_:)` alongside everything else as a single flat radio
+group (no nested submenu — gauge/arc/pie/wedge are top-level choices).
+Each menu action writes `displayMode` and then calls `rerenderFromCache()`
+— that repaints the status item from the last polled values immediately,
+rather than making the user wait for the next 5s poll to see their choice
+take effect.
 
 **Top spawners excludes PID 1.** launchd is the ancestor of nearly
 every userland process, so it would always pin to the top with no
