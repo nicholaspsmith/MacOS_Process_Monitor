@@ -528,21 +528,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .number:
                 renderText("\(pct)")          // bare number, no "%"
             case .gauge:
-                renderSymbol(warn ? "gauge.with.dots.needle.100percent" : "gauge.with.dots.needle.50percent", warn: warn)
+                renderSymbol(warn ? "gauge.with.dots.needle.100percent" : "gauge.with.dots.needle.50percent", fallback: "\(pct)", warn: warn)
             case .chart:
-                renderSymbol(warn ? "chart.bar.fill" : "chart.bar", warn: warn)
+                renderSymbol(warn ? "chart.bar.fill" : "chart.bar", fallback: "\(pct)", warn: warn)
             }
         }
     }
 
-    private func renderSymbol(_ name: String, warn: Bool) {
+    private func renderSymbol(_ name: String, fallback: String, warn: Bool) {
         guard let button = statusItem.button else { return }
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: "Process usage")?
+            .withSymbolConfiguration(config) else {
+            // Symbol unavailable — fall back to text so the item is never blank.
+            button.image = nil
+            button.imagePosition = .noImage
+            button.contentTintColor = nil
+            button.attributedTitle = NSAttributedString(
+                string: fallback,
+                attributes: [
+                    .foregroundColor: warn ? NSColor.systemRed : NSColor.labelColor,
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+                ]
+            )
+            return
+        }
+        image.isTemplate = true
         button.attributedTitle = NSAttributedString(string: "")
         button.imagePosition = .imageOnly
-        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: "Process usage")?
-            .withSymbolConfiguration(config)
-        image?.isTemplate = true
         button.image = image
         button.contentTintColor = warn ? .systemRed : nil
     }
