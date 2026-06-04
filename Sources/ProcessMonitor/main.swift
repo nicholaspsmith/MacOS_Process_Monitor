@@ -427,14 +427,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         respawn.record(all)
 
         let pct = count * 100 / limit
-        let color: NSColor = pct >= warnPct ? .systemRed : .labelColor
-        statusItem.button?.attributedTitle = NSAttributedString(
-            string: "\(count)/\(limit) (\(pct)%)",
-            attributes: [
-                .foregroundColor: color,
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
-            ]
-        )
+        renderStatusItem(count: count, limit: limit, pct: pct, warn: pct >= warnPct)
 
         if pct >= warnPct {
             if !lastNotifiedAtOrAbove {
@@ -444,6 +437,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if pct < warnPct - 5 {
             lastNotifiedAtOrAbove = false
         }
+    }
+
+    private func renderStatusItem(count: Int, limit: Int, pct: Int, warn: Bool) {
+        guard let button = statusItem.button else { return }
+        let mode = DisplayMode.current
+
+        // Helper to render text and clear any image.
+        func renderText(_ s: String) {
+            button.image = nil
+            button.contentTintColor = nil
+            button.attributedTitle = NSAttributedString(
+                string: s,
+                attributes: [
+                    .foregroundColor: warn ? NSColor.systemRed : NSColor.labelColor,
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
+                ]
+            )
+        }
+
+        switch mode {
+        case .countTotalPct:
+            renderText("\(count)/\(limit) (\(pct)%)")
+        case .countTotal:
+            renderText("\(count)/\(limit)")
+        case .percent:
+            renderText("\(pct)%")
+        case .iconOnly:
+            switch IconStyle.current {
+            case .number:
+                renderText("\(pct)")          // bare number, no "%"
+            case .gauge:
+                renderSymbol(warn ? "gauge.with.dots.needle.100percent" : "gauge.with.dots.needle.50percent", warn: warn)
+            case .chart:
+                renderSymbol(warn ? "chart.bar.fill" : "chart.bar", warn: warn)
+            }
+        }
+    }
+
+    private func renderSymbol(_ name: String, warn: Bool) {
+        guard let button = statusItem.button else { return }
+        button.attributedTitle = NSAttributedString(string: "")
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "Process usage")?
+            .withSymbolConfiguration(config)
+        image?.isTemplate = true
+        button.image = image
+        button.contentTintColor = warn ? .systemRed : nil
     }
 
     private func notify(count: Int, pct: Int) {
