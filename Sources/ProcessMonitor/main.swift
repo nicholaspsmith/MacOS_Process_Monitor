@@ -205,7 +205,7 @@ enum DisplayMode: String {
     case percent         // "46%"
     case iconOnly        // SF Symbol or bare number, per IconStyle
 
-    static let storageKey = "displayMode"
+    private static let storageKey = "displayMode"
     static var current: DisplayMode {
         get { UserDefaults.standard.string(forKey: storageKey).flatMap(DisplayMode.init) ?? .countTotalPct }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: storageKey) }
@@ -217,7 +217,7 @@ enum IconStyle: String {
     case chart           // chart.bar SF Symbol
     case number          // bare percent number, no "%"
 
-    static let storageKey = "iconStyle"
+    private static let storageKey = "iconStyle"
     static var current: IconStyle {
         get { UserDefaults.standard.string(forKey: storageKey).flatMap(IconStyle.init) ?? .gauge }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: storageKey) }
