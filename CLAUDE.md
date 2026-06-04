@@ -78,6 +78,33 @@ when the min→max suffix ends in certain digits). Always
 `ceil()` + a small buffer (~4px) when sizing a label that's going into
 a menu item view.
 
+**Status-item rendering is funnelled through one entry point so the
+display can be user-configurable.** All status-item drawing goes through
+`renderStatusItem(count:limit:pct:warn:)` (with a `renderSymbol(_:warn:)`
+helper); what it produces is driven by two `UserDefaults`-backed enums,
+`DisplayMode` and `IconStyle` (keys `displayMode` / `iconStyle`).
+They default to `.countTotalPct` / `.gauge`, so existing installs keep
+the original `<count>/<limit> (<pct>%)` text behavior untouched. The two
+render paths are **mutually exclusive** and must stay that way: text
+modes (Count/Total (%), Count/Total, Percent, Icon→Number) draw via
+`attributedTitle` — red foreground when usage ≥ `warnPct` — while icon
+modes (gauge, chart) draw a template SF Symbol via `button.image`, use
+`button.contentTintColor = .systemRed` for the warning state, and swap
+to heavier glyph variants (`gauge.with.dots.needle.100percent`,
+`chart.bar.fill`) when warning. Set `imagePosition` explicitly on every
+path (`.noImage` for text, `.imageOnly` for icons) — otherwise the
+unused half leaves stray title spacing in the bar.
+
+**The "Display" submenu is built lazily like the rest of the menu, and
+mode changes re-render from cache.** It's assembled in
+`menuNeedsUpdate(_:)` alongside everything else; the nested "Icon style"
+submenu is only added when `displayMode == iconOnly`, so users never see
+icon-style choices that wouldn't apply. Each menu action writes its
+UserDefaults key and then calls `rerenderFromCache()` — that repaints
+the status item from the last polled values immediately, rather than
+making the user wait for the next 5s poll to see their choice take
+effect.
+
 **Top spawners excludes PID 1.** launchd is the ancestor of nearly
 every userland process, so it would always pin to the top with no
 signal. The exclusion is in `topSpawners(_:topN:)`.
