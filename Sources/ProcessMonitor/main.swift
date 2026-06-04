@@ -493,80 +493,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .percent:
             renderText("\(pct)%")
         case .gauge:
-            renderIcon(makeGaugeImage(pct: pct, warn: warn), warn: warn)
+            renderIcon(makeGaugeImage(pct: pct))
         case .arc:
-            renderIcon(makeArcImage(pct: pct, warn: warn), warn: warn)
+            renderIcon(makeArcImage(pct: pct))
         case .pie:
-            renderIcon(makePieImage(pct: pct, warn: warn), warn: warn)
+            renderIcon(makePieImage(pct: pct))
         case .wedge:
-            renderIcon(makeWedgeImage(pct: pct, warn: warn), warn: warn)
+            renderIcon(makeWedgeImage(pct: pct))
         }
     }
 
     // Sets an icon image on the status item (mutually exclusive with text).
-    private func renderIcon(_ image: NSImage, warn: Bool) {
+    // Icons are full-color (non-template), so contentTintColor is cleared.
+    private func renderIcon(_ image: NSImage) {
         guard let button = statusItem.button else { return }
         button.attributedTitle = NSAttributedString(string: "")
         button.imagePosition = .imageOnly
+        button.contentTintColor = nil
         button.image = image
-        button.contentTintColor = warn ? .systemRed : nil
     }
 
-    // Speedometer gauge: needle angle is proportional to pct. Template image, so
-    // color comes from the menu bar tint / contentTintColor, not the drawing.
-    private func makeGaugeImage(pct: Int, warn: Bool) -> NSImage {
+    // Severity color for the data-driven icons: green when well under the cap,
+    // orange as it climbs, red once usage reaches the warn threshold.
+    private func meterColor(pct: Int) -> NSColor {
+        if pct >= warnPct { return .systemRed }
+        if pct >= 50 { return .systemOrange }
+        return .systemGreen
+    }
+
+    // Speedometer gauge: needle angle is proportional to pct. Full-color
+    // (non-template); severity drives the color, alpha separates track vs needle.
+    private func makeGaugeImage(pct: Int) -> NSImage {
         let frac = CGFloat(max(0, min(100, pct))) / 100
+        let color = meterColor(pct: pct)
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
             let center = NSPoint(x: rect.midX, y: rect.midY - 1.5)
             let radius: CGFloat = 6.5
-            NSColor.black.set()
             // Arc spanning ~250°, open at the bottom (lower-left to lower-right over the top).
             let startAngle: CGFloat = 215
             let endAngle: CGFloat = -35
             let track = NSBezierPath()
             track.appendArc(withCenter: center, radius: radius,
                             startAngle: startAngle, endAngle: endAngle, clockwise: true)
-            track.lineWidth = warn ? 2.0 : 1.3
+            track.lineWidth = 2.4
             track.lineCapStyle = .round
+            color.withAlphaComponent(0.28).set()
             track.stroke()
             // Needle: interpolate from arc start (0%) to arc end (100%).
+            color.set()
             let needleAngle = (startAngle + (endAngle - startAngle) * frac) * .pi / 180
-            let tip = NSPoint(x: center.x + cos(needleAngle) * (radius - 0.5),
-                              y: center.y + sin(needleAngle) * (radius - 0.5))
+            let tip = NSPoint(x: center.x + cos(needleAngle) * (radius - 0.3),
+                              y: center.y + sin(needleAngle) * (radius - 0.3))
             let needle = NSBezierPath()
             needle.move(to: center)
             needle.line(to: tip)
-            needle.lineWidth = warn ? 2.2 : 1.6
+            needle.lineWidth = 2.8
             needle.lineCapStyle = .round
             needle.stroke()
             // Center hub.
-            let hubR: CGFloat = warn ? 1.8 : 1.5
+            let hubR: CGFloat = 2.3
             NSBezierPath(ovalIn: NSRect(x: center.x - hubR, y: center.y - hubR,
                                         width: hubR * 2, height: hubR * 2)).fill()
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = false
         return image
     }
 
     // Radial arc: faint full track + bold arc filled proportionally to pct.
-    // Template image — alpha differentiates filled vs track; tint comes from the
-    // menu bar / contentTintColor.
-    private func makeArcImage(pct: Int, warn: Bool) -> NSImage {
+    // Full-color (non-template); severity drives the color, alpha separates
+    // filled vs track.
+    private func makeArcImage(pct: Int) -> NSImage {
         let frac = CGFloat(max(0, min(100, pct))) / 100
+        let color = meterColor(pct: pct)
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
             let center = NSPoint(x: rect.midX, y: rect.midY - 1.5)
             let radius: CGFloat = 6.5
             let startAngle: CGFloat = 215
             let endAngle: CGFloat = -35
-            let lineWidth: CGFloat = warn ? 3.0 : 2.4
+            let lineWidth: CGFloat = 3.4
             // Faint full track.
             let track = NSBezierPath()
             track.appendArc(withCenter: center, radius: radius,
                             startAngle: startAngle, endAngle: endAngle, clockwise: true)
             track.lineWidth = lineWidth
             track.lineCapStyle = .round
-            NSColor.black.withAlphaComponent(0.3).set()
+            color.withAlphaComponent(0.28).set()
             track.stroke()
             // Bold filled portion from the start up to the current fraction.
             if frac > 0 {
@@ -576,29 +588,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                startAngle: startAngle, endAngle: fillEnd, clockwise: true)
                 fill.lineWidth = lineWidth
                 fill.lineCapStyle = .round
-                NSColor.black.set()
+                color.set()
                 fill.stroke()
             }
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = false
         return image
     }
 
     // Pie: full circle outline = per-UID cap; filled wedge = fraction in use.
-    private func makePieImage(pct: Int, warn: Bool) -> NSImage {
+    // Full-color (non-template); severity drives the color.
+    private func makePieImage(pct: Int) -> NSImage {
         let frac = CGFloat(max(0, min(100, pct))) / 100
+        let color = meterColor(pct: pct)
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
             let center = NSPoint(x: rect.midX, y: rect.midY)
             let radius: CGFloat = 7
-            NSColor.black.set()
+            color.set()
             let circle = NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius,
                                                      width: radius * 2, height: radius * 2))
-            circle.lineWidth = warn ? 2.0 : 1.3
+            circle.lineWidth = 2.2
             circle.stroke()
             // Filled wedge from 12 o'clock, clockwise, proportional to pct.
             if frac > 0 {
-                let wedgeRadius = radius - (warn ? 1.0 : 2.0)
+                let wedgeRadius = radius - 1.4
                 let wedge = NSBezierPath()
                 wedge.move(to: center)
                 wedge.appendArc(withCenter: center, radius: wedgeRadius,
@@ -608,19 +622,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = false
         return image
     }
 
     // Pie variant: solid wedge = fraction in use; faint full disk = remaining cap.
-    // Template image — alpha differentiates wedge vs remainder.
-    private func makeWedgeImage(pct: Int, warn: Bool) -> NSImage {
+    // Full-color (non-template); severity drives the color, alpha separates
+    // wedge vs remainder.
+    private func makeWedgeImage(pct: Int) -> NSImage {
         let frac = CGFloat(max(0, min(100, pct))) / 100
+        let color = meterColor(pct: pct)
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
             let center = NSPoint(x: rect.midX, y: rect.midY)
-            let radius: CGFloat = 7
+            let radius: CGFloat = 7.5
             // Faint full disk = total capacity.
-            NSColor.black.withAlphaComponent(0.28).set()
+            color.withAlphaComponent(0.28).set()
             NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius,
                                         width: radius * 2, height: radius * 2)).fill()
             // Solid wedge from 12 o'clock, clockwise, proportional to pct.
@@ -630,12 +646,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 wedge.appendArc(withCenter: center, radius: radius,
                                 startAngle: 90, endAngle: 90 - 360 * frac, clockwise: true)
                 wedge.close()
-                NSColor.black.set()
+                color.set()
                 wedge.fill()
             }
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = false
         return image
     }
 
