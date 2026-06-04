@@ -3,9 +3,9 @@
 ## Problem
 
 The status-item title is always `<count>/<limit> (<pct>%)` (e.g. `1234/2666 (46%)`),
-rendered in `refresh()` at `main.swift:404`. This takes up a lot of horizontal
-space in the menu bar. Give the user a way to choose a more compact
-representation, including data-driven icons.
+rendered in `refresh()`. This takes up a lot of horizontal space in the menu
+bar. Give the user a way to choose a more compact representation, including
+data-driven icons.
 
 ## Setting
 
@@ -15,17 +15,19 @@ One setting, persisted in `UserDefaults.standard`:
   - `countTotalPct` *(default — preserves current behavior)*
   - `countTotal`
   - `percent`
-  - `gauge`  *(custom-drawn gauge icon)*
-  - `pie`    *(custom-drawn pie icon)*
+  - `gauge`  *(custom-drawn needle gauge)*
+  - `arc`    *(custom-drawn filled radial arc)*
+  - `pie`    *(custom-drawn pie: outline + wedge)*
+  - `wedge`  *(custom-drawn pie: solid wedge on a faint disk)*
 
 Modeled as a Swift enum `DisplayMode` with `rawValue` strings and a fallback to
 the default when the stored value is missing or unrecognized. There is **no**
-separate icon-style sub-setting and **no** nested submenu — the gauge and pie
-are top-level choices in a single flat radio group.
+separate icon-style sub-setting and **no** nested submenu — the four icons are
+top-level choices in a single flat radio group.
 
 ## Rendering
 
-Extract the status-item update currently inline in `refresh()` into a method:
+The status-item update lives in a method extracted out of `refresh()`:
 
 ```
 renderStatusItem(count: Int, limit: Int, pct: Int, warn: Bool)
@@ -38,65 +40,75 @@ waiting for the next 5s poll.
 
 Switch on `displayMode`:
 
-| Mode            | Output (example at 1234 / 2666, 46%)         | Mechanism |
-|-----------------|----------------------------------------------|-----------|
-| `countTotalPct` | `1234/2666 (46%)`                            | `attributedTitle`, image cleared |
-| `countTotal`    | `1234/2666`                                  | `attributedTitle`, image cleared |
-| `percent`       | `46%`                                        | `attributedTitle`, image cleared |
-| `gauge`         | speedometer needle at ~46% of the arc        | `button.image` (custom-drawn), title cleared |
-| `pie`           | circle outline with a ~46% filled wedge      | `button.image` (custom-drawn), title cleared |
+| Mode            | Output (example at 1234 / 2666, 46%)              | Mechanism |
+|-----------------|---------------------------------------------------|-----------|
+| `countTotalPct` | `1234/2666 (46%)`                                 | `attributedTitle`, image cleared |
+| `countTotal`    | `1234/2666`                                       | `attributedTitle`, image cleared |
+| `percent`       | `46%`                                             | `attributedTitle`, image cleared |
+| `gauge`         | speedometer needle at ~46% of the arc             | `button.image` (custom-drawn), title cleared |
+| `arc`           | ~250° track with a bold arc filled to ~46%        | `button.image` (custom-drawn), title cleared |
+| `pie`           | circle outline with a ~46% filled wedge           | `button.image` (custom-drawn), title cleared |
+| `wedge`         | solid ~46% wedge on a faint full disk             | `button.image` (custom-drawn), title cleared |
 
 - Text modes keep the existing monospaced-digit font
   (`NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)`).
-- The text path and the image path are **mutually exclusive**. Text path:
-  `button.image = nil`, `button.imagePosition = .noImage`,
-  `button.contentTintColor = nil`, then set `attributedTitle`. Image path:
-  `attributedTitle = NSAttributedString(string: "")`,
-  `button.imagePosition = .imageOnly`, then set `button.image`.
+- The text path and the image path are **mutually exclusive**. Text path
+  (`renderText`): `button.image = nil`, `button.imagePosition = .noImage`,
+  `button.contentTintColor = nil`, then set `attributedTitle`. Image path
+  (`renderIcon`): `attributedTitle = NSAttributedString(string: "")`,
+  `button.imagePosition = .imageOnly`, `button.contentTintColor = nil`, then
+  set `button.image`.
 
 ### Data-driven icons (custom-drawn)
 
-Both icons are drawn into an `NSImage` (≈18×18 pt) via
-`NSImage(size:flipped:drawingHandler:)` using `NSBezierPath`, and marked
-`isTemplate = true` so the menu bar tints them appropriately for light/dark.
-Because they are template images, the *shape* encodes the data and emphasis;
-*color* (including the red warning state) is applied by the menu bar tint /
-`button.contentTintColor`, not by the drawing.
+Each icon is built with `NSImage(size:flipped:drawingHandler:)` (18×18) in a
+`make…Image(pct:)` function using `NSBezierPath`. The arc sweep, needle angle,
+or wedge angle is sized directly from `pct` (i.e. `count/limit`), so the glyph
+reflects live usage and updates on each 5s poll.
 
-- **Gauge** — a speedometer-style arc (≈220° sweep, open at the bottom) with a
-  needle whose angle is interpolated linearly from the arc start (0%) to the
-  arc end (100%) by `pct`. A small center hub anchors the needle.
-- **Pie** — a full circle outline representing the per-UID cap; a filled wedge
-  starting at 12 o'clock and sweeping clockwise by `pct/100 × 360°` represents
-  the processes currently in use.
+- **`gauge`** — a ~250° arc (open at the bottom) with a needle whose angle
+  interpolates from the arc start (0%) to the arc end (100%), plus a center hub.
+- **`arc`** — the same ~250° arc drawn as a faint full track with a bold arc
+  stroked from the start up to the current fraction.
+- **`pie`** — a circle outline (the per-UID cap) with a filled wedge from 12
+  o'clock, clockwise, proportional to `pct`.
+- **`wedge`** — a faint full disk (the cap) with a solid wedge from 12 o'clock,
+  clockwise, proportional to `pct`.
 
-`pct` is clamped to `0...100` before use.
+Icons are **non-template** (`isTemplate = false`) because color carries
+information. `meterColor(pct:)` returns the drawing color:
+
+- green below 50%
+- orange from 50% up to `warnPct` (85)
+- red at/above `warnPct`
+
+The faint track / remainder is the same hue at ~0.28 alpha so each glyph reads
+as a single object. (SF Symbols were considered first but cannot render a
+data-proportional fill, which is why the icons are hand-drawn.)
 
 ## Warning cue (≥ 85%)
 
-The existing notification logic and its 5pt hysteresis (`main.swift:412–419`)
-are **unchanged**. This covers only the visual cue on the status item, driven
-by the `warn` flag (`pct >= warnPct`):
+The existing notification logic and its 5pt hysteresis are **unchanged**. This
+covers only the visual cue on the status item, driven by `pct`:
 
-- **Text modes**: red foreground color, exactly as today.
-- **Icon modes** (`gauge`, `pie`): tint red via
-  `button.contentTintColor = .systemRed` **and** draw with bolder emphasis
-  (thicker strokes; the pie's filled wedge extends closer to the rim). When not
-  warning, `contentTintColor = nil` so the template glyph stays adaptive and
-  the strokes are drawn at their normal weight.
+- **Text modes**: red foreground color when `pct >= warnPct`, exactly as today.
+- **Icon modes**: no special-case red tint — the severity color from
+  `meterColor(pct:)` is already red at/above `warnPct`, so the icon turns red as
+  part of the normal green→orange→red progression.
 
 ## Menu
 
 Built in `menuNeedsUpdate(_:)` alongside the rest of the menu, inserted before
 "Open Activity Monitor". Pattern mirrors the existing "Start at Login" toggle:
-read the current setting to set checkmark state; the action writes the setting
-and re-renders.
+read current setting to set checkmark state, action writes the setting and
+re-renders.
 
-- A single **"Display"** submenu containing one radio group of 5 items
-  (`Count / Total (%)`, `Count / Total`, `Percent`, `Gauge`, `Pie`). The active
-  mode shows `.state = .on`.
-- The action (`setDisplayMode(_:)`) reads `representedObject` (the mode
-  `rawValue`), writes `DisplayMode.current`, and calls `rerenderFromCache()`.
+- **"Display"** submenu: a single flat radio group for `displayMode`. The active
+  mode shows `.state = .on`. Labels: `Count / Total (%)`, `Count / Total`,
+  `Percent`, `Gauge (needle)`, `Gauge (arc)`, `Pie (outline)`, `Pie (filled)`.
+- Each item: `target = self`, an `@objc` action (`setDisplayMode(_:)`) that
+  writes the UserDefaults key (the chosen `rawValue` is carried in
+  `representedObject`) and calls `rerenderFromCache()`.
 
 ## Error / initial states
 
