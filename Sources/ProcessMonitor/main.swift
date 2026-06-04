@@ -199,27 +199,17 @@ final class RespawnDetector {
 
 // MARK: - Settings
 
+/// How the menu bar status item is rendered. Persisted in UserDefaults.
 enum DisplayMode: String {
     case countTotalPct   // "1234/2666 (46%)"  — default
     case countTotal      // "1234/2666"
     case percent         // "46%"
-    case iconOnly        // SF Symbol or bare number, per IconStyle
+    case gauge           // custom-drawn speedometer reflecting pct
+    case pie             // custom-drawn pie: filled wedge = in use, full circle = cap
 
     private static let storageKey = "displayMode"
     static var current: DisplayMode {
         get { UserDefaults.standard.string(forKey: storageKey).flatMap(DisplayMode.init) ?? .countTotalPct }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: storageKey) }
-    }
-}
-
-enum IconStyle: String {
-    case gauge           // gauge SF Symbol — default
-    case chart           // chart.bar SF Symbol
-    case number          // bare percent number, no "%"
-
-    private static let storageKey = "iconStyle"
-    static var current: IconStyle {
-        get { UserDefaults.standard.string(forKey: storageKey).flatMap(IconStyle.init) ?? .gauge }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: storageKey) }
     }
 }
@@ -335,7 +325,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             (.countTotalPct, "Count / Total (%)"),
             (.countTotal, "Count / Total"),
             (.percent, "Percent"),
-            (.iconOnly, "Icon only"),
+            (.gauge, "Gauge"),
+            (.pie, "Pie"),
         ]
         let activeMode = DisplayMode.current
         for (mode, label) in modes {
@@ -344,26 +335,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.representedObject = mode.rawValue
             item.state = (mode == activeMode) ? .on : .off
             displaySub.addItem(item)
-        }
-        if activeMode == .iconOnly {
-            displaySub.addItem(NSMenuItem.separator())
-            let iconHeader = NSMenuItem(title: "Icon style", action: nil, keyEquivalent: "")
-            let iconSub = NSMenu()
-            let styles: [(IconStyle, String)] = [
-                (.gauge, "Gauge"),
-                (.chart, "Chart"),
-                (.number, "Number"),
-            ]
-            let activeStyle = IconStyle.current
-            for (style, label) in styles {
-                let item = NSMenuItem(title: label, action: #selector(setIconStyle(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = style.rawValue
-                item.state = (style == activeStyle) ? .on : .off
-                iconSub.addItem(item)
-            }
-            iconHeader.submenu = iconSub
-            displaySub.addItem(iconHeader)
         }
         displayHeader.submenu = displaySub
         menu.addItem(displayHeader)
@@ -460,12 +431,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rerenderFromCache()
     }
 
-    @objc private func setIconStyle(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let style = IconStyle(rawValue: raw) else { return }
-        IconStyle.current = style
-        rerenderFromCache()
-    }
-
     private func rerenderFromCache() {
         let pct = limit > 0 ? latestCount * 100 / limit : 0
         renderStatusItem(count: latestCount, limit: limit, pct: pct, warn: pct >= warnPct)
@@ -523,41 +488,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             renderText("\(count)/\(limit)")
         case .percent:
             renderText("\(pct)%")
-        case .iconOnly:
-            switch IconStyle.current {
-            case .number:
-                renderText("\(pct)")          // bare number, no "%"
-            case .gauge:
-                renderSymbol(warn ? "gauge.with.dots.needle.100percent" : "gauge.with.dots.needle.50percent", fallback: "\(pct)", warn: warn)
-            case .chart:
-                renderSymbol(warn ? "chart.bar.fill" : "chart.bar", fallback: "\(pct)", warn: warn)
-            }
+        case .gauge:
+            renderIcon(makeGaugeImage(pct: pct, warn: warn), warn: warn)
+        case .pie:
+            renderIcon(makePieImage(pct: pct, warn: warn), warn: warn)
         }
     }
 
-    private func renderSymbol(_ name: String, fallback: String, warn: Bool) {
+    // Sets an icon image on the status item (mutually exclusive with text).
+    private func renderIcon(_ image: NSImage, warn: Bool) {
         guard let button = statusItem.button else { return }
-        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
-        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: "Process usage")?
-            .withSymbolConfiguration(config) else {
-            // Symbol unavailable — fall back to text so the item is never blank.
-            button.image = nil
-            button.imagePosition = .noImage
-            button.contentTintColor = nil
-            button.attributedTitle = NSAttributedString(
-                string: fallback,
-                attributes: [
-                    .foregroundColor: warn ? NSColor.systemRed : NSColor.labelColor,
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
-                ]
-            )
-            return
-        }
-        image.isTemplate = true
         button.attributedTitle = NSAttributedString(string: "")
         button.imagePosition = .imageOnly
         button.image = image
         button.contentTintColor = warn ? .systemRed : nil
+    }
+
+    // Speedometer gauge: needle angle is proportional to pct. Template image, so
+    // color comes from the menu bar tint / contentTintColor, not the drawing.
+    private func makeGaugeImage(pct: Int, warn: Bool) -> NSImage {
+        let frac = CGFloat(max(0, min(100, pct))) / 100
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let center = NSPoint(x: rect.midX, y: rect.midY - 1.5)
+            let radius: CGFloat = 6.5
+            NSColor.black.set()
+            // Arc spanning ~250°, open at the bottom (lower-left to lower-right over the top).
+            let startAngle: CGFloat = 215
+            let endAngle: CGFloat = -35
+            let track = NSBezierPath()
+            track.appendArc(withCenter: center, radius: radius,
+                            startAngle: startAngle, endAngle: endAngle, clockwise: true)
+            track.lineWidth = warn ? 2.0 : 1.3
+            track.lineCapStyle = .round
+            track.stroke()
+            // Needle: interpolate from arc start (0%) to arc end (100%).
+            let needleAngle = (startAngle + (endAngle - startAngle) * frac) * .pi / 180
+            let tip = NSPoint(x: center.x + cos(needleAngle) * (radius - 0.5),
+                              y: center.y + sin(needleAngle) * (radius - 0.5))
+            let needle = NSBezierPath()
+            needle.move(to: center)
+            needle.line(to: tip)
+            needle.lineWidth = warn ? 2.2 : 1.6
+            needle.lineCapStyle = .round
+            needle.stroke()
+            // Center hub.
+            let hubR: CGFloat = warn ? 1.8 : 1.5
+            NSBezierPath(ovalIn: NSRect(x: center.x - hubR, y: center.y - hubR,
+                                        width: hubR * 2, height: hubR * 2)).fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
+    // Pie: full circle outline = per-UID cap; filled wedge = fraction in use.
+    private func makePieImage(pct: Int, warn: Bool) -> NSImage {
+        let frac = CGFloat(max(0, min(100, pct))) / 100
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            let radius: CGFloat = 7
+            NSColor.black.set()
+            let circle = NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius,
+                                                     width: radius * 2, height: radius * 2))
+            circle.lineWidth = warn ? 2.0 : 1.3
+            circle.stroke()
+            // Filled wedge from 12 o'clock, clockwise, proportional to pct.
+            if frac > 0 {
+                let wedgeRadius = radius - (warn ? 1.0 : 2.0)
+                let wedge = NSBezierPath()
+                wedge.move(to: center)
+                wedge.appendArc(withCenter: center, radius: wedgeRadius,
+                                startAngle: 90, endAngle: 90 - 360 * frac, clockwise: true)
+                wedge.close()
+                wedge.fill()
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
     }
 
     private func notify(count: Int, pct: Int) {
