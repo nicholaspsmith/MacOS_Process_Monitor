@@ -1,6 +1,9 @@
 import AppKit
-import ServiceManagement
-import UserNotifications
+// Re-exported so ProcRec / displayName / etc. are visible module-wide,
+// including to ProcessDetailWindow.swift (which is intentionally left
+// unmodified and has no import of its own).
+@_exported import ProcessMonitorCore
+import StatusItemKit
 
 // MARK: - Kernel limit
 
@@ -14,187 +17,12 @@ func readProcessLimit() -> Int {
 
 // MARK: - Process snapshot
 
-struct ProcRec {
-    let pid: Int
-    let ppid: Int
-    let user: String
-    let etime: String  // elapsed time since start, e.g. "01:23" or "1-02:34:56"
-    let comm: String   // executable basename; can include spaces (e.g. "Google Chrome Helper")
-}
-
+// Runs `ps` and parses it into [ProcRec]. Thin wrapper over StatusItemKit's
+// Shell + ProcessMonitorCore's parseProcs; kept in the app target because
+// ProcessDetailWindow.swift (which re-runs ps on its own timer) calls it.
 func readAllProcs() -> [ProcRec]? {
-    let task = Process()
-    task.launchPath = "/bin/ps"
-    task.arguments = ["-axo", "pid,ppid,user,etime,comm", "-ww"]
-    let pipe = Pipe()
-    task.standardOutput = pipe
-    task.standardError = Pipe()
-    do { try task.run() } catch { return nil }
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    task.waitUntilExit()
-    guard task.terminationStatus == 0,
-          let text = String(data: data, encoding: .utf8) else { return nil }
-
-    var result: [ProcRec] = []
-    let lines = text.split(separator: "\n", omittingEmptySubsequences: true).dropFirst()
-    for line in lines {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        // First 4 tokens are pid/ppid/user/etime; everything after is comm (may contain spaces).
-        let parts = trimmed.split(
-            maxSplits: 4,
-            omittingEmptySubsequences: true,
-            whereSeparator: { $0.isWhitespace }
-        ).map(String.init)
-        guard parts.count == 5,
-              let pid = Int(parts[0]),
-              let ppid = Int(parts[1]) else { continue }
-        result.append(ProcRec(pid: pid, ppid: ppid, user: parts[2], etime: parts[3], comm: parts[4]))
-    }
-    return result
-}
-
-// MARK: - Top spawners
-
-// Strip the absolute path prefix that `ps -axo comm` returns for most
-// processes (e.g. "/sbin/launchd" → "launchd"), and drop the leading "-"
-// that ps prepends to login shells ("-zsh" → "zsh").
-func displayName(_ comm: String) -> String {
-    var s = comm
-    if s.hasPrefix("-") { s = String(s.dropFirst()) }
-    return (s as NSString).lastPathComponent
-}
-
-// Counts each PID's total descendants (transitive children) by walking the
-// PPID graph. Returns the top N PIDs that actually have descendants, sorted
-// descending. PID 1 (launchd) is excluded — it's the ancestor of nearly
-// every userland process, so it would always pin to the top with no signal.
-func topSpawners(_ all: [ProcRec], topN: Int) -> [(comm: String, pid: Int, descendants: Int)] {
-    var children: [Int: [Int]] = [:]
-    for p in all {
-        children[p.ppid, default: []].append(p.pid)
-    }
-    var counts: [Int: Int] = [:]
-    for p in all where p.pid != 1 {
-        var n = 0
-        var stack = children[p.pid] ?? []
-        while let pid = stack.popLast() {
-            n += 1
-            if let cs = children[pid] { stack.append(contentsOf: cs) }
-        }
-        if n > 0 { counts[p.pid] = n }
-    }
-    return all
-        .compactMap { p -> (comm: String, pid: Int, descendants: Int)? in
-            guard let n = counts[p.pid] else { return nil }
-            return (displayName(p.comm), p.pid, n)
-        }
-        .sorted { $0.descendants > $1.descendants }
-        .prefix(topN)
-        .map { $0 }
-}
-
-// MARK: - Sparkline history
-
-final class CountHistory {
-    private var values: [Int] = []
-    private let maxLen: Int
-    init(maxLen: Int) { self.maxLen = maxLen }
-
-    func record(_ v: Int) {
-        values.append(v)
-        if values.count > maxLen { values.removeFirst() }
-    }
-
-    func sparkline() -> String {
-        let bars = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
-        guard !values.isEmpty else { return "" }
-        let lo = values.min()!
-        let hi = values.max()!
-        guard hi > lo else {
-            return String(repeating: bars[3], count: values.count)
-        }
-        let span = Double(hi - lo)
-        return values.map { v in
-            let frac = Double(v - lo) / span
-            let idx = min(bars.count - 1, Int(frac * Double(bars.count)))
-            return bars[idx]
-        }.joined()
-    }
-
-    var range: (min: Int, max: Int)? {
-        guard let lo = values.min(), let hi = values.max() else { return nil }
-        return (lo, hi)
-    }
-}
-
-// MARK: - Respawn-loop detector
-
-// Records per-comm PIDs at each poll, then flags names that look like a
-// crash loop rather than a worker pool. Two patterns we need to tell apart:
-//
-//   crash loop:  peak simultaneous ≈ 1, but many distinct PIDs over time
-//                (one slot keeps getting replaced — what contactsd did
-//                during the May 19 incident).
-//
-//   worker pool: peak simultaneous = N, many distinct PIDs over time
-//                (mdworker_shared, plugin-container, ExtensionKit
-//                helpers — all designed to be short-lived).
-//
-// The discriminator is `distinct / peak`: how many times each slot was
-// replaced inside the window. Flag only when that ratio is high enough
-// that normal short-lived helpers don't trip it.
-//
-// Also excluded: `ps` (we spawn it every poll, so it'd always self-flag)
-// and `<defunct>` (a state, not an identity — every reaped zombie ends
-// up there regardless of original name).
-final class RespawnDetector {
-    private var snapshots: [[String: Set<Int>]] = []
-    private let windowSize: Int
-    private let minDistinct: Int
-    private let minChurnRatio: Int
-
-    private static let excluded: Set<String> = ["ps", "<defunct>"]
-
-    init(windowSize: Int, minDistinct: Int, minChurnRatio: Int) {
-        self.windowSize = windowSize
-        self.minDistinct = minDistinct
-        self.minChurnRatio = minChurnRatio
-    }
-
-    func record(_ procs: [ProcRec]) {
-        var byComm: [String: Set<Int>] = [:]
-        for p in procs {
-            byComm[p.comm, default: []].insert(p.pid)
-        }
-        snapshots.append(byComm)
-        if snapshots.count > windowSize { snapshots.removeFirst() }
-    }
-
-    struct Looping {
-        let comm: String
-        let distinct: Int
-        let peak: Int
-    }
-
-    func looping() -> [Looping] {
-        var union: [String: Set<Int>] = [:]
-        var peak: [String: Int] = [:]
-        for snap in snapshots {
-            for (c, pids) in snap {
-                union[c, default: []].formUnion(pids)
-                peak[c] = max(peak[c] ?? 0, pids.count)
-            }
-        }
-        return union.compactMap { (c, pids) -> Looping? in
-            let basename = (c as NSString).lastPathComponent
-            if Self.excluded.contains(basename) { return nil }
-            let distinct = pids.count
-            let p = max(peak[c] ?? 1, 1)
-            guard distinct > minDistinct, distinct / p >= minChurnRatio else { return nil }
-            return Looping(comm: c, distinct: distinct, peak: p)
-        }
-        .sorted { $0.distinct > $1.distinct }
-    }
+    guard let text = Shell.run("/bin/ps", ["-axo", "pid,ppid,user,etime,comm", "-ww"]) else { return nil }
+    return parseProcs(text)
 }
 
 // MARK: - Settings
@@ -218,7 +46,7 @@ enum DisplayMode: String {
 
 // MARK: - App
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private let limit = readProcessLimit()
     private let warnPct = 85
     private let pollSeconds: TimeInterval = 5
@@ -227,9 +55,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let respawnMinDistinct = 5             // need at least this many PIDs over the window
     private let respawnMinChurnRatio = 5           // and distinct/peak >= this (slot replaced N times)
 
-    private var statusItem: NSStatusItem!
-    private var menu: NSMenu!
-    private var timer: Timer?
+    private var controller: StatusItemController!
+    private let notifier = Notifier()
     private var lastNotifiedAtOrAbove = false
     private let history: CountHistory
     private let respawn: RespawnDetector
@@ -248,26 +75,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.attributedTitle = NSAttributedString(string: "…")
+        notifier.requestAuthorization()
 
-        menu = NSMenu()
-        menu.delegate = self
-        statusItem.menu = menu
-
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-
-        refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: pollSeconds, repeats: true) { [weak self] _ in
-            self?.refresh()
-        }
+        controller = StatusItemController(
+            pollInterval: pollSeconds,
+            onPoll: { [weak self] in self?.refresh() },
+            onBuildMenu: { [weak self] menu in self?.buildMenu(menu) }
+        )
+        controller.start()
     }
 
     // MARK: Menu (lazy rebuild on open)
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-
+    private func buildMenu(_ menu: NSMenu) {
         // Sparkline — view-based so it doesn't reserve trailing space for the
         // keyboard-shortcut column that macOS menus apply to standard items.
         let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -279,7 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return spark
         }()
         let sparkItem = NSMenuItem()
-        sparkItem.view = makeSparklineView(text: sparkText, font: mono)
+        sparkItem.view = MenuBuilder.textView(sparkText, font: mono)
         menu.addItem(sparkItem)
 
         // Crash-loop section (only when present)
@@ -349,47 +169,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Start at Login toggle. Reflects current SMAppService status.
         let loginItem = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
         loginItem.target = self
-        loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        loginItem.state = LoginItem.isEnabled ? .on : .off
         menu.addItem(loginItem)
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-    }
-
-    // Wraps a label in an NSView sized to its intrinsic content. Used so the
-    // sparkline item escapes NSMenu's standard layout (where every row
-    // reserves columns for checkmark + shortcut indicator alignment).
-    // Uses explicit frames rather than constraints — NSMenu reads the view's
-    // frame at insertion time, before any auto-layout pass would have run, so
-    // a constraint-only view ends up zero-sized and invisible. Measures text
-    // directly via NSString.size(withAttributes:) since NSTextField's
-    // intrinsicContentSize rounds down to sub-pixel values and clips the
-    // trailing glyph.
-    private func makeSparklineView(text: String, font: NSFont) -> NSView {
-        let leftPad: CGFloat = 20
-        let rightPad: CGFloat = 6
-        let vPad: CGFloat = 3
-        // Safety buffer: covers sub-pixel font metrics so the last glyph
-        // never clips, regardless of which characters end up in the text.
-        let textBuffer: CGFloat = 4
-
-        let attrs: [NSAttributedString.Key: Any] = [.font: font]
-        let measured = (text as NSString).size(withAttributes: attrs)
-        let labelWidth = ceil(measured.width) + textBuffer
-        let labelHeight = ceil(measured.height)
-
-        let label = NSTextField(labelWithString: text)
-        label.font = font
-        label.textColor = .secondaryLabelColor
-        label.frame = NSRect(x: leftPad, y: vPad, width: labelWidth, height: labelHeight)
-
-        let container = NSView(frame: NSRect(
-            x: 0, y: 0,
-            width: labelWidth + leftPad + rightPad,
-            height: labelHeight + vPad * 2
-        ))
-        container.addSubview(label)
-        return container
     }
 
     @objc private func showSpawnerDetail(_ sender: NSMenuItem) {
@@ -403,25 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleLoginItem() {
-        let svc = SMAppService.mainApp
-        do {
-            if svc.status == .enabled {
-                try svc.unregister()
-            } else {
-                try svc.register()
-            }
-        } catch {
-            // Most common failure: app isn't in /Applications or ~/Applications.
-            let alert = NSAlert()
-            alert.messageText = "Couldn't toggle Start at Login"
-            alert.informativeText = """
-            \(error.localizedDescription)
-
-            macOS requires the app to live in /Applications or ~/Applications for this to work. Move ProcessMonitor.app there and try again.
-            """
-            alert.alertStyle = .warning
-            alert.runModal()
-        }
+        LoginItem.toggle()
     }
 
     @objc private func openActivityMonitor() {
@@ -444,7 +210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func refresh() {
         guard let all = readAllProcs() else {
-            statusItem.button?.attributedTitle = NSAttributedString(string: "ps?")
+            controller.button?.attributedTitle = NSAttributedString(string: "ps?")
             return
         }
         latestProcs = all
@@ -467,205 +233,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // Single render funnel. Text modes and icon modes are mutually exclusive:
+    // text via controller.setTitle (red on warn), icons via controller.setIcon.
+    // Icon color encodes severity (green <50%, orange <warnPct, red ≥ warnPct).
     private func renderStatusItem(count: Int, limit: Int, pct: Int, warn: Bool) {
-        guard let button = statusItem.button else { return }
         let mode = DisplayMode.current
-
-        // Helper to render text and clear any image.
-        func renderText(_ s: String) {
-            button.image = nil
-            button.imagePosition = .noImage
-            button.contentTintColor = nil
-            button.attributedTitle = NSAttributedString(
-                string: s,
-                attributes: [
-                    .foregroundColor: warn ? NSColor.systemRed : NSColor.labelColor,
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
-                ]
-            )
-        }
+        let frac = CGFloat(max(0, min(100, pct))) / 100
+        let color = Severity.level(pct: pct, warnPct: warnPct).color
 
         switch mode {
         case .countTotalPct:
-            renderText("\(count)/\(limit) (\(pct)%)")
+            controller.setTitle("\(count)/\(limit) (\(pct)%)", warn: warn)
         case .countTotal:
-            renderText("\(count)/\(limit)")
+            controller.setTitle("\(count)/\(limit)", warn: warn)
         case .percent:
-            renderText("\(pct)%")
+            controller.setTitle("\(pct)%", warn: warn)
         case .gauge:
-            renderIcon(makeGaugeImage(pct: pct))
+            controller.setIcon(MeterIcon.gauge(fraction: frac, color: color))
         case .arc:
-            renderIcon(makeArcImage(pct: pct))
+            controller.setIcon(MeterIcon.arc(fraction: frac, color: color))
         case .pie:
-            renderIcon(makePieImage(pct: pct))
+            controller.setIcon(MeterIcon.pie(fraction: frac, color: color))
         case .wedge:
-            renderIcon(makeWedgeImage(pct: pct))
+            controller.setIcon(MeterIcon.wedge(fraction: frac, color: color))
         }
-    }
-
-    // Sets an icon image on the status item (mutually exclusive with text).
-    // Icons are full-color (non-template), so contentTintColor is cleared.
-    private func renderIcon(_ image: NSImage) {
-        guard let button = statusItem.button else { return }
-        button.attributedTitle = NSAttributedString(string: "")
-        button.imagePosition = .imageOnly
-        button.contentTintColor = nil
-        button.image = image
-    }
-
-    // Severity color for the data-driven icons: green when well under the cap,
-    // orange as it climbs, red once usage reaches the warn threshold.
-    private func meterColor(pct: Int) -> NSColor {
-        if pct >= warnPct { return .systemRed }
-        if pct >= 50 { return .systemOrange }
-        return .systemGreen
-    }
-
-    // Speedometer gauge: needle angle is proportional to pct. Full-color
-    // (non-template); severity drives the color, alpha separates track vs needle.
-    private func makeGaugeImage(pct: Int) -> NSImage {
-        let frac = CGFloat(max(0, min(100, pct))) / 100
-        let color = meterColor(pct: pct)
-        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
-            let center = NSPoint(x: rect.midX, y: rect.midY - 1.5)
-            let radius: CGFloat = 6.5
-            // Arc spanning ~250°, open at the bottom (lower-left to lower-right over the top).
-            let startAngle: CGFloat = 215
-            let endAngle: CGFloat = -35
-            let track = NSBezierPath()
-            track.appendArc(withCenter: center, radius: radius,
-                            startAngle: startAngle, endAngle: endAngle, clockwise: true)
-            track.lineWidth = 2.4
-            track.lineCapStyle = .round
-            color.withAlphaComponent(0.28).set()
-            track.stroke()
-            // Needle: interpolate from arc start (0%) to arc end (100%).
-            color.set()
-            let needleAngle = (startAngle + (endAngle - startAngle) * frac) * .pi / 180
-            let tip = NSPoint(x: center.x + cos(needleAngle) * (radius - 0.3),
-                              y: center.y + sin(needleAngle) * (radius - 0.3))
-            let needle = NSBezierPath()
-            needle.move(to: center)
-            needle.line(to: tip)
-            needle.lineWidth = 2.8
-            needle.lineCapStyle = .round
-            needle.stroke()
-            // Center hub.
-            let hubR: CGFloat = 2.3
-            NSBezierPath(ovalIn: NSRect(x: center.x - hubR, y: center.y - hubR,
-                                        width: hubR * 2, height: hubR * 2)).fill()
-            return true
-        }
-        image.isTemplate = false
-        return image
-    }
-
-    // Radial arc: faint full track + bold arc filled proportionally to pct.
-    // Full-color (non-template); severity drives the color, alpha separates
-    // filled vs track.
-    private func makeArcImage(pct: Int) -> NSImage {
-        let frac = CGFloat(max(0, min(100, pct))) / 100
-        let color = meterColor(pct: pct)
-        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
-            let center = NSPoint(x: rect.midX, y: rect.midY - 1.5)
-            let radius: CGFloat = 6.5
-            let startAngle: CGFloat = 215
-            let endAngle: CGFloat = -35
-            let lineWidth: CGFloat = 3.4
-            // Faint full track.
-            let track = NSBezierPath()
-            track.appendArc(withCenter: center, radius: radius,
-                            startAngle: startAngle, endAngle: endAngle, clockwise: true)
-            track.lineWidth = lineWidth
-            track.lineCapStyle = .round
-            color.withAlphaComponent(0.28).set()
-            track.stroke()
-            // Bold filled portion from the start up to the current fraction.
-            if frac > 0 {
-                let fillEnd = startAngle + (endAngle - startAngle) * frac
-                let fill = NSBezierPath()
-                fill.appendArc(withCenter: center, radius: radius,
-                               startAngle: startAngle, endAngle: fillEnd, clockwise: true)
-                fill.lineWidth = lineWidth
-                fill.lineCapStyle = .round
-                color.set()
-                fill.stroke()
-            }
-            return true
-        }
-        image.isTemplate = false
-        return image
-    }
-
-    // Pie: full circle outline = per-UID cap; filled wedge = fraction in use.
-    // Full-color (non-template); severity drives the color.
-    private func makePieImage(pct: Int) -> NSImage {
-        let frac = CGFloat(max(0, min(100, pct))) / 100
-        let color = meterColor(pct: pct)
-        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
-            let center = NSPoint(x: rect.midX, y: rect.midY)
-            let radius: CGFloat = 7
-            color.set()
-            let circle = NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius,
-                                                     width: radius * 2, height: radius * 2))
-            circle.lineWidth = 2.2
-            circle.stroke()
-            // Filled wedge from 12 o'clock, clockwise, proportional to pct.
-            if frac > 0 {
-                let wedgeRadius = radius - 1.4
-                let wedge = NSBezierPath()
-                wedge.move(to: center)
-                wedge.appendArc(withCenter: center, radius: wedgeRadius,
-                                startAngle: 90, endAngle: 90 - 360 * frac, clockwise: true)
-                wedge.close()
-                wedge.fill()
-            }
-            return true
-        }
-        image.isTemplate = false
-        return image
-    }
-
-    // Pie variant: solid wedge = fraction in use; faint full disk = remaining cap.
-    // Full-color (non-template); severity drives the color, alpha separates
-    // wedge vs remainder.
-    private func makeWedgeImage(pct: Int) -> NSImage {
-        let frac = CGFloat(max(0, min(100, pct))) / 100
-        let color = meterColor(pct: pct)
-        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
-            let center = NSPoint(x: rect.midX, y: rect.midY)
-            let radius: CGFloat = 7.5
-            // Faint full disk = total capacity.
-            color.withAlphaComponent(0.28).set()
-            NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius,
-                                        width: radius * 2, height: radius * 2)).fill()
-            // Solid wedge from 12 o'clock, clockwise, proportional to pct.
-            if frac > 0 {
-                let wedge = NSBezierPath()
-                wedge.move(to: center)
-                wedge.appendArc(withCenter: center, radius: radius,
-                                startAngle: 90, endAngle: 90 - 360 * frac, clockwise: true)
-                wedge.close()
-                color.set()
-                wedge.fill()
-            }
-            return true
-        }
-        image.isTemplate = false
-        return image
     }
 
     private func notify(count: Int, pct: Int) {
-        let content = UNMutableNotificationContent()
-        content.title = "Process count high"
-        content.body = "\(count) of \(limit) processes (\(pct)%). Kill some before fork() starts failing."
-        content.sound = .default
-        let request = UNNotificationRequest(
-            identifier: "process-monitor.threshold.\(Date().timeIntervalSince1970)",
-            content: content,
-            trigger: nil
+        notifier.post(
+            title: "Process count high",
+            body: "\(count) of \(limit) processes (\(pct)%). Kill some before fork() starts failing."
         )
-        UNUserNotificationCenter.current().add(request, withCompletionHandler: nil)
     }
 }
 
