@@ -8,6 +8,47 @@ returning `EAGAIN` and breaks terminals, browsers, and most apps.
 Mirrors `ps -u $USER | wc -l` exactly so the menu bar number matches what you
 see in a shell.
 
+## What the menu bar shows
+
+The status item shows your per-UID process count against the cap. The default is
+text — `<count>/<limit> (<pct>%)` in monospaced digits — but the **Display**
+submenu offers seven configurations: three text and four custom-drawn icons.
+
+| Mode | `displayMode` | Menu bar |
+|------|---------------|----------|
+| Count / limit / pct (default) | `countTotalPct` | ![count limit pct](screenshots/menubar-mode-counttotalpct.png) |
+| Count / limit | `countTotal` | ![count limit](screenshots/menubar-mode-counttotal.png) |
+| Percent | `percent` | ![percent](screenshots/menubar-mode-percent.png) |
+| Gauge (needle) | `gauge` | ![gauge](screenshots/menubar-mode-gauge.png) |
+| Arc | `arc` | ![arc](screenshots/menubar-mode-arc.png) |
+| Pie | `pie` | ![pie](screenshots/menubar-mode-pie.png) |
+| Wedge | `wedge` | ![wedge](screenshots/menubar-mode-wedge.png) |
+
+Severity is colour-coded on the icon modes — green < 50%, orange < 85%, red ≥ 85%
+— and the text modes turn **red** at/above the 85% threshold:
+
+| 30% (green) | 70% (orange) | 90% (red) | text ≥ 85% |
+|:-:|:-:|:-:|:-:|
+| ![green](screenshots/menubar-sev-green.png) | ![orange](screenshots/menubar-sev-orange.png) | ![red](screenshots/menubar-sev-red.png) | ![text warning](screenshots/menubar-text-warning.png) |
+
+The threshold notification has a 5pt hysteresis so a single bounce around the
+limit doesn't spam alerts.
+
+Click the icon for:
+
+- **Sparkline** of the recent count history.
+- **Crash-looping** submenu — names caught by the respawn-loop detector
+  (shown only when there's something to report).
+- **Top spawners** submenu — the processes spawning the most children;
+  click an entry to open a floating detail window for it.
+- **Open Activity Monitor** (⌘A).
+- **Start at Login** toggle.
+- **Quit** (⌘Q).
+
+The detail window auto-refreshes every 2s while open and has a manual
+Refresh button. There is no "Refresh now" in the main menu — the 5s polling
+loop makes it redundant.
+
 ## Build
 
 Requires Xcode command line tools (Swift 5.9+, macOS 13+).
@@ -16,16 +57,20 @@ Requires Xcode command line tools (Swift 5.9+, macOS 13+).
 ./scripts/build-app.sh
 ```
 
-Produces `build/ProcessMonitor.app`.
+Produces `build/ProcessMonitor.app`. The script wraps the Swift Package
+Manager binary in a `.app` bundle and ad-hoc `codesign`s it — the signature
+is required, because `UNUserNotificationCenter` silently drops notification
+requests from unsigned bundles and threshold alerts won't fire.
 
 ## Run
 
 ```sh
-open build/ProcessMonitor.app
+open ~/Applications/ProcessMonitor.app
 ```
 
-The icon appears in the menu bar (no Dock icon — `LSUIElement` is set). Click
-it for "Refresh now" and "Quit".
+`~/Applications/ProcessMonitor.app` is a symlink to `build/ProcessMonitor.app`,
+so rebuilds propagate without re-copying. The icon appears in the menu bar
+(no Dock icon — `LSUIElement` is set).
 
 On first launch macOS will ask for notification permission. Approve it,
 otherwise the threshold alert can't fire.
@@ -35,14 +80,14 @@ otherwise the threshold alert can't fire.
 Tunables live at the top of `Sources/ProcessMonitor/main.swift`:
 
 - `warnPct` — threshold in percent (default `85`)
-- `pollSeconds` — refresh interval (default `5`)
+- `pollSeconds` — refresh interval in seconds (default `5`)
 
 Rebuild after changing.
 
 ## Start at login (optional)
 
-To launch at login without a LaunchAgent, add `ProcessMonitor.app` under
-**System Settings → General → Login Items → Open at Login**.
-
-A LaunchAgent would also work but isn't installed by default — keeping the
-launch decision in the user's hands avoids surprise behavior.
+Use the **Start at Login** toggle in the menu. It registers the app via
+`SMAppService.mainApp` (bundle-ID based) rather than a LaunchAgent —
+macOS manages the lifecycle, and the app must live in `/Applications` or
+`~/Applications` for registration to be accepted (which is what the
+`~/Applications` symlink above provides).
