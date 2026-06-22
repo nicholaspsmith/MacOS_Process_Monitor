@@ -20,31 +20,60 @@ created so rebuilds propagate automatically without re-copying and so
 location. Don't replace it with a copy unless you have a reason to —
 the symlink keeps the dev loop tight.
 
-There are **no unit tests** — this is a GUI app and all verification is
-manual. The build script is fast (~3s), so the loop is:
+The **pure logic lives in `ProcessMonitorCore` and is unit-tested**
+(`swift test` — parseProcs, topSpawners incl. PID-1 exclusion,
+CountHistory, RespawnDetector incl. the crash-loop-vs-worker-pool churn
+gate). The **GUI half (menu bar, icons, windows) has no tests** and is
+verified manually. The build script is fast (~3s), so the loop is:
 1. Edit
 2. `pkill -x ProcessMonitor; ./scripts/build-app.sh; open ~/Applications/ProcessMonitor.app`
 3. Click the menu bar item and check.
 
-The build script does an ad-hoc `codesign` pass. **Do not remove it** —
+`./scripts/build-app.sh` now delegates to the shared builder
+`../StatusItemKit/scripts/make-app.sh` (StatusItemKit must be a sibling
+checkout). It still does an ad-hoc `codesign` pass. **Do not remove it** —
 `UNUserNotificationCenter` silently drops notification requests from
 unsigned bundles, and threshold alerts will appear to "not fire" if the
 signature is missing.
 
 ## Layout
 
-- `Sources/ProcessMonitor/main.swift` — entry point, AppDelegate,
-  status-item rendering, polling loop, state classes (CountHistory,
-  RespawnDetector), top-spawners computation, menu construction.
+The package has two first-party targets plus the StatusItemKit dependency
+(local path `../StatusItemKit`, declared in `Package.swift`):
+
+- `Sources/ProcessMonitorCore/` — **pure, AppKit-free, unit-tested logic.**
+  `ProcRec` + `parseProcs(_:)` + `displayName(_:)` (ProcRec.swift),
+  `topSpawners(_:topN:)` (TopSpawners.swift), `CountHistory`
+  (CountHistory.swift), `RespawnDetector` + its churn-ratio gate
+  (RespawnDetector.swift). Tests in `Tests/ProcessMonitorCoreTests/`.
+- `Sources/ProcessMonitor/main.swift` — entry point, AppDelegate, the
+  `onPoll`/`onBuildMenu` closures, the render funnel, `readProcessLimit()`
+  (sysctl, stays here), `DisplayMode` (UserDefaults, stays here), and a
+  thin `readAllProcs()` wrapper (Shell.run + parseProcs). The status-item
+  lifecycle, icon drawing, login item, notifier, and sparkline view-builder
+  are **no longer here** — they come from StatusItemKit (see below). It
+  does `@_exported import ProcessMonitorCore` so the Core symbols are
+  visible module-wide, including to the unmodified ProcessDetailWindow.swift.
 - `Sources/ProcessMonitor/ProcessDetailWindow.swift` — the floating
   window that opens when you click a Top Spawners entry. Runs its own
   ps refresh on a 2s timer while open; closes its timer in
-  `windowWillClose`.
+  `windowWillClose`. Calls `readAllProcs()`/`displayName`/`ProcRec` from
+  the app module — **leave it unmodified** (it has no imports of its own
+  and relies on the `@_exported` re-export above).
+- **StatusItemKit** (`../StatusItemKit`) provides:
+  `StatusItemController(pollInterval:onPoll:onBuildMenu:)` (owns the
+  NSStatusItem + poll timer + lazy `menuNeedsUpdate`) with the mutually-
+  exclusive `setTitle(_:warn:)` / `setIcon(_:)` render funnel;
+  `MeterIcon.gauge/arc/pie/wedge(fraction:color:)` (the four data-driven
+  icons, extracted from this app); `Severity.level(pct:warnPct:).color`
+  (the green/orange/red mapping); `MenuBuilder.textView(_:font:)` (the
+  view-based sparkline row); `LoginItem.toggle()`/`.isEnabled`
+  (SMAppService); `Notifier.post(title:body:)`; `Shell.run`.
 - `Resources/Info.plist` — `LSUIElement=true` (no Dock icon) plus the
   bundle ID `com.nicholaspsmith.ProcessMonitor` that
   `UNUserNotificationCenter` and `SMAppService` rely on.
-- `scripts/build-app.sh` — wraps the Swift Package Manager binary in
-  a `.app` bundle and ad-hoc signs it.
+- `scripts/build-app.sh` — execs `../StatusItemKit/scripts/make-app.sh`,
+  which wraps the SwiftPM binary in a `.app` bundle and ad-hoc signs it.
 
 ## Non-obvious decisions (load-bearing)
 
@@ -58,7 +87,9 @@ distinguishes "one slot keeps being replaced" (crash loop) from "many
 slots turn over normally" (worker pool). `ps` and `<defunct>` are also
 on an explicit exclude list. If you tune the thresholds, keep this
 distinction in mind: removing the ratio gate brings back the false
-positives.
+positives. This lives in `ProcessMonitorCore/RespawnDetector.swift` and
+its `ProcessMonitorCoreTests` cover **both** sides — crash loop must
+flag, worker pool must not.
 
 **Sparkline is a view-based NSMenuItem on purpose.** Standard menu
 items reserve trailing column space for keyboard-shortcut indicators
@@ -69,53 +100,58 @@ only way to escape that reservation and let the menu width be driven by
 the sparkline content. **Use explicit frames, not auto-layout
 constraints**: NSMenu reads the view's frame at insertion time, before
 any layout pass would have run, so a constraint-only view ends up
-zero-sized and renders as nothing.
+zero-sized and renders as nothing. *This view-builder now lives in
+StatusItemKit as `MenuBuilder.textView(_:font:)`; the app calls it.*
 
 **Label width is measured via `NSString.size(withAttributes:)`, not
 `NSTextField.intrinsicContentSize`.** The latter returns sub-pixel
 widths that get rounded down and clip the trailing glyph (most visible
 when the min→max suffix ends in certain digits). Always
 `ceil()` + a small buffer (~4px) when sizing a label that's going into
-a menu item view.
+a menu item view. *Implemented in StatusItemKit's `MenuBuilder.labelWidth`.*
 
 **Status-item rendering is funnelled through one entry point so the
-display can be user-configurable.** All status-item drawing goes through
-`renderStatusItem(count:limit:pct:warn:)`, which switches on a single
-`UserDefaults`-backed enum, `DisplayMode` (key `displayMode`, default
-`.countTotalPct` so existing installs keep the original
-`<count>/<limit> (<pct>%)` text). There are seven modes: three text
-(`countTotalPct`, `countTotal`, `percent`) and four data-driven icons
-(`gauge` = needle, `arc` = filled radial arc, `pie` = circle outline +
-wedge, `wedge` = solid wedge on a faint disk). The text path and the
-icon path are **mutually exclusive** and must stay that way: text modes
-draw via `attributedTitle` (red foreground when usage ≥ `warnPct`);
-icon modes set `button.image` via `renderIcon(_:)`. Set `imagePosition`
-explicitly on every path (`.noImage` for text, `.imageOnly` for icons) —
-otherwise the unused half leaves stray title spacing in the bar.
+display can be user-configurable.** The app's `renderStatusItem(count:limit:pct:warn:)`
+switches on a single `UserDefaults`-backed enum, `DisplayMode` (key
+`displayMode`, default `.countTotalPct` so existing installs keep the
+original `<count>/<limit> (<pct>%)` text) and dispatches to StatusItemKit's
+controller. There are seven modes: three text (`countTotalPct`,
+`countTotal`, `percent`) and four data-driven icons (`gauge` = needle,
+`arc` = filled radial arc, `pie` = circle outline + wedge, `wedge` =
+solid wedge on a faint disk). The text path and the icon path are
+**mutually exclusive** and must stay that way — enforced now by
+`StatusItemController.setTitle(_:warn:)` (red foreground when usage ≥
+`warnPct`) vs `.setIcon(_:)`, which each set `imagePosition` explicitly
+(`.noImage` for text, `.imageOnly` for icons); otherwise the unused half
+leaves stray title spacing in the bar.
 
 **The icons are custom-drawn, full-color, and encode `count/limit`
-live.** Each icon is built with `NSImage(size:flipped:drawingHandler:)`
-in a `make…Image(pct:)` function using `NSBezierPath` (arcs/wedges sized
-to `pct`). They are **non-template** (`isTemplate = false`) because color
-carries information: `meterColor(pct:)` returns green below 50%, orange
-below `warnPct`, red at/above it — so the icon itself signals severity,
-which is also why icon modes don't use the text path's `contentTintColor`
-red-tint trick (`renderIcon` clears it). The faint track/remainder is the
-same hue at low alpha so each glyph reads as one object. SF Symbols were
-tried first but can't do a data-proportional fill, hence the hand drawing.
+live.** Each is built with `NSImage(size:flipped:drawingHandler:)` and
+`NSBezierPath` (arcs/wedges sized to a 0…1 fraction). They are
+**non-template** (`isTemplate = false`) because color carries information:
+the app passes `Severity.level(pct:warnPct:85).color` — green below 50%,
+orange below `warnPct`, red at/above it — so the icon itself signals
+severity, which is also why icon modes don't use the text path's
+`contentTintColor` red-tint trick (`setIcon` clears it). The faint
+track/remainder is the same hue at low alpha so each glyph reads as one
+object. SF Symbols were tried first but can't do a data-proportional
+fill, hence the hand drawing. *The four meters + the severity mapping
+now live in StatusItemKit (`MeterIcon.gauge/arc/pie/wedge`, `Severity`) —
+they were originally extracted FROM this app, so they render identically.*
 
 **The "Display" submenu is built lazily like the rest of the menu, and
-mode changes re-render from cache.** It's assembled in
-`menuNeedsUpdate(_:)` alongside everything else as a single flat radio
-group (no nested submenu — gauge/arc/pie/wedge are top-level choices).
-Each menu action writes `displayMode` and then calls `rerenderFromCache()`
-— that repaints the status item from the last polled values immediately,
-rather than making the user wait for the next 5s poll to see their choice
-take effect.
+mode changes re-render from cache.** It's assembled in the app's
+`onBuildMenu` closure (driven by `StatusItemController.menuNeedsUpdate`)
+alongside everything else as a single flat radio group (no nested submenu
+— gauge/arc/pie/wedge are top-level choices). Each menu action writes
+`displayMode` and then calls `rerenderFromCache()` — that repaints the
+status item from the last polled values immediately, rather than making
+the user wait for the next 5s poll to see their choice take effect.
 
 **Top spawners excludes PID 1.** launchd is the ancestor of nearly
 every userland process, so it would always pin to the top with no
-signal. The exclusion is in `topSpawners(_:topN:)`.
+signal. The exclusion is in `topSpawners(_:topN:)`
+(`ProcessMonitorCore/TopSpawners.swift`, covered by a unit test).
 
 **No LaunchAgent for autostart.** The May 19 incident root cause
 involved a user-installed LaunchAgent (`com.user.killapplemediatracking`)
@@ -153,10 +189,11 @@ it, and expect that to require explicit user permission.
 - Status bar text shows `<count>/<limit> (<pct>%)`, monospaced digits.
   Goes red at ≥ 85% with a 5pt hysteresis on the notification so a
   single bounce around the threshold doesn't spam.
-- Menu rebuild is lazy via `NSMenuDelegate.menuNeedsUpdate(_:)`. The
-  5s polling loop updates the internal state buffers (CountHistory,
-  RespawnDetector, latest ProcRec array); the menu only re-reads them
-  when the user clicks.
+- Menu rebuild is lazy: `StatusItemController` is the `NSMenuDelegate`
+  and calls the app's `onBuildMenu` closure on open. The 5s polling loop
+  (the app's `onPoll` closure) updates the internal state buffers
+  (CountHistory, RespawnDetector, latest ProcRec array); the menu only
+  re-reads them when the user clicks.
 - Crash-looping submenu header is omitted entirely when the detector
   returns nothing, by design. The user shouldn't see a section that's
   just `(none)`.
