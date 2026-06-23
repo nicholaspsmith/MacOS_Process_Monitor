@@ -91,3 +91,6 @@ Use the **Start at Login** toggle in the menu. It registers the app via
 macOS manages the lifecycle, and the app must live in `/Applications` or
 `~/Applications` for registration to be accepted (which is what the
 `~/Applications` symlink above provides).
+
+Alternatively, add the app under System Settings → General → Login Items
+("Open at Login"). Use one method, not both, or it may launch twice at login.
