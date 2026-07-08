@@ -63,6 +63,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var latestProcs: [ProcRec] = []
     private var latestCount = 0
     private var detailWindows: [ProcessDetailWindowController] = []
+    private let pollQueue = DispatchQueue(label: "processmonitor.poll")
+    private var pollInFlight = false   // main-thread only; drops overlapping polls
 
     override init() {
         history = CountHistory(maxLen: historyLen)
@@ -208,28 +210,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Polling
 
+    // Invoked on the main thread by StatusItemController's timer. The blocking
+    // `ps` call (readAllProcs → Shell.run) runs on a background queue so it can
+    // never freeze the run loop and stop the status-item menu opening on click;
+    // state (latestProcs/latestCount/history/respawn) is mutated back on main,
+    // so buildMenu reads only main-written state and there's no data race.
+    // Overlapping ticks are dropped. (ProcessDetailWindow keeps its own on-main
+    // ps refresh — now timeout-bounded by Shell.run — and is left unchanged.)
     private func refresh() {
-        guard let all = readAllProcs() else {
-            controller.button?.attributedTitle = NSAttributedString(string: "ps?")
-            return
-        }
-        latestProcs = all
-        let user = NSUserName()
-        let count = all.reduce(0) { $0 + ($1.user == user ? 1 : 0) }
-        latestCount = count
-        history.record(count)
-        respawn.record(all)
+        if pollInFlight { return }
+        pollInFlight = true
+        pollQueue.async { [weak self] in
+            guard let self = self else { return }
+            let procs = readAllProcs()   // Shell.run("/bin/ps") + parseProcs, off main
+            DispatchQueue.main.async {
+                self.pollInFlight = false
+                guard let all = procs else {
+                    self.controller.button?.attributedTitle = NSAttributedString(string: "ps?")
+                    return
+                }
+                self.latestProcs = all
+                let user = NSUserName()
+                let count = all.reduce(0) { $0 + ($1.user == user ? 1 : 0) }
+                self.latestCount = count
+                self.history.record(count)
+                self.respawn.record(all)
 
-        let pct = count * 100 / limit
-        renderStatusItem(count: count, limit: limit, pct: pct, warn: pct >= warnPct)
+                let pct = count * 100 / self.limit
+                self.renderStatusItem(count: count, limit: self.limit, pct: pct, warn: pct >= self.warnPct)
 
-        if pct >= warnPct {
-            if !lastNotifiedAtOrAbove {
-                notify(count: count, pct: pct)
-                lastNotifiedAtOrAbove = true
+                if pct >= self.warnPct {
+                    if !self.lastNotifiedAtOrAbove {
+                        self.notify(count: count, pct: pct)
+                        self.lastNotifiedAtOrAbove = true
+                    }
+                } else if pct < self.warnPct - 5 {
+                    self.lastNotifiedAtOrAbove = false
+                }
             }
-        } else if pct < warnPct - 5 {
-            lastNotifiedAtOrAbove = false
         }
     }
 
