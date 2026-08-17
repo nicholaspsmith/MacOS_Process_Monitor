@@ -56,6 +56,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let respawnMinChurnRatio = 5           // and distinct/peak >= this (slot replaced N times)
 
     private var controller: StatusItemController!
+    /// Steps this icon aside while Curtain reveals the hidden block — the bar has
+    /// no spare room, so a reveal borrows slots from the apps that cooperate.
+    /// Restores itself on a timer if Curtain goes away mid-reveal.
+    private var yieldClient: YieldClient!
     private let notifier = Notifier()
     private var lastNotifiedAtOrAbove = false
     private let history: CountHistory
@@ -85,6 +89,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onBuildMenu: { [weak self] menu in self?.buildMenu(menu) }
         )
         controller.start()
+        yieldClient = YieldClient(item: controller)
+        yieldClient.start()
     }
 
     // MARK: Menu (lazy rebuild on open)
