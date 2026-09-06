@@ -99,6 +99,10 @@ macOS manages the lifecycle, and the app must live in `/Applications` or
 Alternatively, add the app under System Settings → General → Login Items
 ("Open at Login"). Use one method, not both, or it may launch twice at login.
 
+## Why not a SwiftBar plugin?
+
+This is a standalone `.app` built on [StatusItemKit](https://github.com/nicholaspsmith/StatusItemKit), not a script under a plugin host: no SwiftBar to install, a real AppKit menu instead of rendered stdout, event-driven updates instead of a re-run timer, and an icon that keeps its place in the bar. The gauge, arc, pie and wedge icons are drawn from the live count with StatusItemKit's `MeterIcon`; a plugin could only show text or a fixed image. The full comparison is in [StatusItemKit's README](https://github.com/nicholaspsmith/StatusItemKit#why-not-swiftbar).
+
 ## The menu-bar suite
 
 Part of a suite of macOS menu-bar apps that share one framework, one
