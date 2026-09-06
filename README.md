@@ -2,6 +2,8 @@
 
 <p align="center"><img src="docs/mascot.png" width="160" alt="Process Monitor mascot, from the Menubarn widget library"></p>
 
+<p align="center">Part of the <a href="https://widgets.nicksmith.software">Menubarn</a> widget library.</p>
+
 ![The Process Monitor menu](screenshots/menu.png)
 
 A tiny macOS menu bar app that shows the number of processes owned by the
