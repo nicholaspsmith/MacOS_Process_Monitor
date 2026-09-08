@@ -283,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .wedge:
             controller.setIcon(MeterIcon.wedge(fraction: frac, color: color))
         case .octopus:
-            controller.setIcon(CharacterIcon.octopus(fraction: frac, color: color))
+            controller.setIcon(CharacterIcon.octopus(fraction: frac))
         }
     }
 
