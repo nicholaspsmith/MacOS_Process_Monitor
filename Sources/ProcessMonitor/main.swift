@@ -36,7 +36,7 @@ enum DisplayMode: String {
     case arc             // custom-drawn radial arc filled proportionally to pct
     case pie             // custom-drawn pie: filled wedge = in use, circle outline = cap
     case wedge           // custom-drawn pie: solid wedge = in use, faint disk = remaining cap
-    case octopus         // the mascot, filling from the bottom with pct
+    case octopus         // the mascot, growing from squid to eight red arms with pct
 
     private static let storageKey = "displayMode"
     static var current: DisplayMode {
@@ -160,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (.arc, "Gauge (arc)"),
             (.pie, "Pie (outline)"),
             (.wedge, "Pie (filled)"),
-            (.octopus, "Octopus (fills)"),
+            (.octopus, "Octopus (grows)"),
         ]
         let activeMode = DisplayMode.current
         for (mode, label) in modes {
