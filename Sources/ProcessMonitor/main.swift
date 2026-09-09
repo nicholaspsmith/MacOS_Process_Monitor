@@ -36,7 +36,7 @@ enum DisplayMode: String {
     case arc             // custom-drawn radial arc filled proportionally to pct
     case pie             // custom-drawn pie: filled wedge = in use, circle outline = cap
     case wedge           // custom-drawn pie: solid wedge = in use, faint disk = remaining cap
-    case octopus         // the mascot, growing from squid to eight red arms with pct
+    case octopus         // the mascot, growing and heating from two green arms to eight red ones
 
     private static let storageKey = "displayMode"
     static var current: DisplayMode {
