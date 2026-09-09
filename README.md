@@ -18,7 +18,14 @@ see in a shell.
 
 The status item shows your per-UID process count against the cap. The default is
 text — `<count>/<limit> (<pct>%)` in monospaced digits — but the **Display**
-submenu offers seven configurations: three text and four custom-drawn icons.
+submenu offers eight configurations: three text, four custom-drawn meters, and
+the octopus.
+
+![The menu-bar icon](docs/menubar-icon.png)
+
+The **octopus** grows and heats up with the count: four green arms below a
+quarter of the cap, four yellow below half, eight orange below three quarters,
+eight red above that.
 
 | Mode | `displayMode` | Menu bar |
 |------|---------------|----------|
@@ -29,6 +36,7 @@ submenu offers seven configurations: three text and four custom-drawn icons.
 | Arc | `arc` | ![arc](screenshots/menubar-mode-arc.png) |
 | Pie | `pie` | ![pie](screenshots/menubar-mode-pie.png) |
 | Wedge | `wedge` | ![wedge](screenshots/menubar-mode-wedge.png) |
+| Octopus (grows) | `octopus` | four to eight arms, green to red — see above |
 
 Severity is colour-coded on the icon modes — green < 50%, orange < 85%, red ≥ 85%
 — and the text modes turn **red** at/above the 85% threshold:
@@ -117,7 +125,7 @@ colour, and cooperative hiding so no icon strands another.
 | [Claude Usage](https://github.com/nicholaspsmith/claude-usage-menubar) | Claude Code plan limits, resets, and live agent sessions |
 | [Apollo Monitor](https://github.com/nicholaspsmith/apollo-monitor-menubar) | Universal Audio Apollo monitor level, plus a UA process watchdog |
 | [Battery Time](https://github.com/nicholaspsmith/battery-time-menubar) | Time remaining, power mode, and 24h usage |
-| [VPN & DNS](https://github.com/nicholaspsmith/vpn-dns-menubar) | One dot for Mullvad + Tailscale state, with a DNS watcher |
+| [VPN & DNS](https://github.com/nicholaspsmith/vpn-dns-menubar) | A chameleon for Mullvad + Tailscale state, with a DNS watcher |
 | **Process Monitor** | Process-count sparkline against the per-UID limit |
 | [KeyLight](https://github.com/nicholaspsmith/keylight-menubar) | Ctrl+brightness keys remapped to keyboard backlight |
 | [MacRecorder](https://github.com/nicholaspsmith/MacRecorder) | Screen recording with system audio |
