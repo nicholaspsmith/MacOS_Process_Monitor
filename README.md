@@ -100,11 +100,22 @@ Rebuild after changing.
 
 ## Start at login (optional)
 
-Use the **Start at Login** toggle in the menu. It registers the app via
-`SMAppService.mainApp` (bundle-ID based) rather than a LaunchAgent —
-macOS manages the lifecycle, and the app must live in `/Applications` or
-`~/Applications` for registration to be accepted (which is what the
-`~/Applications` symlink above provides).
+Use the **Start at Login** toggle in the menu, or the command line:
+
+```sh
+"$HOME/Applications/ProcessMonitor.app/Contents/MacOS/ProcessMonitor" --login on   # or: off, status
+```
+
+Either way it registers the app via `SMAppService.mainApp` (bundle-ID based)
+rather than a LaunchAgent — macOS manages the lifecycle, and the app must live
+in `/Applications` or `~/Applications` for registration to be accepted (which is
+what the `~/Applications` symlink above provides). That is also why the command
+has to be the *installed* binary: `SMAppService` can only ever register the
+calling process's own bundle, so nothing outside the app can turn it on.
+
+A bare `--login`, or `--login status`, only reports the current state and
+changes nothing. There is no `install.sh` in this repo, so after a
+`./scripts/build-app.sh` on a fresh machine, run the command above yourself.
 
 Alternatively, add the app under System Settings → General → Login Items
 ("Open at Login"). Use one method, not both, or it may launch twice at login.
