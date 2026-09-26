@@ -36,6 +36,21 @@ checkout). It still does an ad-hoc `codesign` pass. **Do not remove it** —
 unsigned bundles, and threshold alerts will appear to "not fire" if the
 signature is missing.
 
+## Releasing
+
+**Every push to `main` is a release** (the Menubarn rule). Before pushing,
+add a dated `## [X.Y.Z] - YYYY-MM-DD` section with `- ` entries to the top of
+`CHANGELOG.md` — minor for features, patch for fixes, worded for someone
+using the app; turn a waiting `## [Unreleased]` into it. Don't tag by hand:
+GitHub's release workflow tags it and publishes the section when it reaches
+`main`, and a push without a new version is refused (pre-push hook locally,
+the workflow on GitHub). After merging, `git pull` for the tag and rebuild so
+the menu shows a clean version. `[no release]` in the tip commit's message is
+only for pushes that change nothing a user runs. This repo has no
+`install.sh`; if the hook is missing (fresh clone), run
+`../StatusItemKit/scripts/release/adopt.sh --hooks-only`. Full rule:
+StatusItemKit README, "Releases: every push is one".
+
 ## Layout
 
 The package has two first-party targets plus the StatusItemKit dependency
