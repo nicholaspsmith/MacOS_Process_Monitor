@@ -4,6 +4,9 @@
 
 <p align="center">Part of the <a href="https://widgets.nicksmith.software">Menubarn</a> widget library.</p>
 
+> [!IMPORTANT]
+> **Merged into [Mac Daddy](https://github.com/nicholaspsmith/mac-daddy-menubar)** (2026-10-01). This repo is archived; Mac Daddy does everything this app did, keeps its settings, and its `install.sh` retires this app.
+
 ![The Process Monitor menu](screenshots/menu.png)
 
 A tiny macOS menu bar app that shows the number of processes owned by the
